@@ -42,7 +42,12 @@ def extraer_caracteristicas_ventana(df_acelerometria):
         caracteristicas.append(feat)
         
     return pd.DataFrame(caracteristicas)
-
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "status": "online",
+        "mensaje": "¡El backend de acelerometría y Random Forest está funcionando correctamente!"
+    })
 @app.route('/analizar', methods=['POST'])
 def analizar():
     try:
