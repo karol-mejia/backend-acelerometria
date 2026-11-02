@@ -7,6 +7,10 @@ from sklearn.ensemble import RandomForestClassifier
 app = Flask(__name__)
 CORS(app)
 
+@app.route('/')
+def inicio():
+    return "¡El backend de acelerometría con Random Forest está activo y funcionando! 🚀"
+
 # Modelo de ejemplo con Random Forest
 X_dummy = np.random.rand(100, 6)
 y_dummy = np.random.choice(['sentada', 'acostada', 'marcha', 'bipeda'], 100)
