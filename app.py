@@ -6,9 +6,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # Permite la comunicación con tu página web
+CORS(app)
 
-# CARGAR EL MODELO RANDOM FOREST AL INICIAR EL SERVIDOR
 MODEL_PATH = 'modelo_random_forest.pkl'
 if os.path.exists(MODEL_PATH):
     modelo_rf = joblib.load(MODEL_PATH)
@@ -49,18 +48,15 @@ def extraer_caracteristicas_ventana(df_acelerometria):
 def analizar():
     try:
         if 'file' not in request.files:
-            return jsonify({'error': 'No se encontró ningún archivo en la petición'}), 400
+            return jsonify({'error': 'No se encontró ningún archivo'}), 400
         
         file = request.files['file']
         filename = file.filename
         
-        # Limpiar ruta en caso de que venga dentro de carpetas en el ZIP
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
         parts = base_name.replace('-', '_').split('_')
-        
-        # Palabras clave de actividades para separar del nombre del paciente
         activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
         
         activity_name = "general"
@@ -73,12 +69,10 @@ def analizar():
             else:
                 patient_parts.append(part.strip())
                 
-        # Construir el nombre limpio del paciente (ej. "Mejia Karol")
         patient_id = " ".join(patient_parts).strip().title()
         if not patient_id:
             patient_id = base_name.strip().title()
 
-        # Mapear actividad a código numérico
         activity_mapping = {
             'acostada': '1',
             'sentada': '2',
@@ -88,7 +82,7 @@ def analizar():
         }
         assigned_code = activity_mapping.get(activity_name, '1')
 
-        # LECTURA ULTRA-ROBUSTA: Soporta cualquier separador
+        # LECTURA ULTRA-ROBUSTA
         df = None
         try:
             file.seek(0)
@@ -123,8 +117,8 @@ def analizar():
                 
                 if len(data_rows) > 0:
                     df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
-            except Exception as parse_err:
-                return jsonify({'error': f'No se pudo interpretar el formato del archivo: {str(parse_err)}'}), 400
+            except Exception:
+                pass
 
         if df is None or df.empty or df.shape[1] < 4:
             return jsonify({'error': 'El archivo no contiene suficientes columnas numéricas válidas.'}), 400
@@ -138,7 +132,6 @@ def analizar():
         if len(df) == 0:
             return jsonify({'error': 'El archivo no contiene datos numéricos limpios.'}), 400
 
-        # Asignar código de actividad a este bloque de datos específico
         df['activityCode'] = assigned_code
 
         activity_counts = df['activityCode'].value_counts().to_dict()
@@ -178,7 +171,6 @@ def analizar():
         return jsonify(resultado)
 
     except Exception as e:
-        print(f"Error procesando el archivo en el servidor: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
