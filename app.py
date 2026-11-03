@@ -1,4 +1,5 @@
 import os
+import re
 import joblib
 import pandas as pd
 import numpy as np
@@ -29,6 +30,11 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
+        # Limpiar ID del paciente o usar el nombre del archivo
+        patient_id = base_name.replace('_', ' ').upper()
+        if not patient_id:
+            patient_id = "PACIENTE 01"
+
         # Lectura robusta del archivo
         file.seek(0)
         file_bytes = file.read()
@@ -56,24 +62,20 @@ def analizar():
                         numeric_row.append(float(token_clean))
                     except ValueError:
                         continue
-            if len(numeric_row) >= 4:
+            
+            # Soporte flexible para archivos de 9 columnas (estándar) o 4 columnas (personalizado)
+            if len(numeric_row) >= 9:
+                # Mapeo estándar de 9 columnas (tiempo, ejes x, y, z)
+                data_rows.append([numeric_row[2] if len(numeric_row) > 2 else len(data_rows)*0.1, numeric_row[3], numeric_row[4], numeric_row[5]])
+            elif len(numeric_row) >= 4:
                 data_rows.append(numeric_row[:4])
+            elif len(numeric_row) == 3:
+                data_rows.append([len(data_rows)*0.1, numeric_row[0], numeric_row[1], numeric_row[2]])
 
         if len(data_rows) == 0:
             return jsonify({'error': 'El archivo no contiene suficientes filas numéricas válidas.'}), 400
 
         df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
-        
-        # Simular distribución de códigos de actividad para generar el desglose de la tabla
-        total_rows = len(df)
-        if total_rows > 3:
-            chunk = total_rows // 3
-            df.loc[:chunk, 'activityCode'] = '2'
-            df.loc[chunk:2*chunk, 'activityCode'] = '3'
-            df.loc[2*chunk:, 'activityCode'] = '4'
-        else:
-            df['activityCode'] = '2'
-
         df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
@@ -81,49 +83,27 @@ def analizar():
         end_time = df['time'].iloc[-1] if 'time' in df.columns else total_records / 10.0
         total_time = max(1, int(round(end_time - start_time)))
 
-        activity_counts = df['activityCode'].value_counts().to_dict()
+        # Simular puntaje y desglose basados en los datos
+        score = int(total_records * 0.25)
+        active_percentage = float(round(min(100.0, max(10.0, (score % 70))), 1))
         
-        activity_mapping_names = {
-            '2': 'Actividad -2',
-            '3': 'Actividad -3',
-            '4': 'Actividad -4'
-        }
-        
-        activity_breakdown = []
-        score = 0
-        active_records = 0
-        
-        for code, count in activity_counts.items():
-            percentage = round((count / total_records) * 100, 1)
-            est_time = max(1, int(round((count / total_records) * total_time)))
-            
-            points_per_sec = 45 if code == '2' else (33 if code == '3' else 25)
-            points_earned = int(est_time * points_per_sec)
-            score += points_earned
-            
-            if code in ['3', '4']:
-                active_records += count
-                
-            act_name = activity_mapping_names.get(str(code), f"Actividad -{code}")
-            activity_breakdown.append({
-                "activity": act_name,
-                "time": f"{est_time} s",
-                "percentage": f"{percentage}%",
-                "points": f"+{points_earned} pts"
-            })
+        activity_breakdown = [{
+            "activity": "Actividad General",
+            "time": f"{total_time} s",
+            "percentage": "100.0%",
+            "points": f"+{score} pts"
+        }]
 
-        active_percentage = float(round((active_records / total_records) * 100, 1)) if total_records > 0 else 0.0
-        
         badge = "Bronce (Nivel Iniciador)"
-        if score > 1500:
+        if score > 800:
             badge = "Oro (Nivel Avanzado)"
-        elif score > 1000:
+        elif score > 500:
             badge = "Plata (Nivel Intermedio)"
 
-        gender = "Femenino" if 'karol' in base_name.lower() else "Masculino"
+        gender = "Femenino" if 'F' in base_name.upper() else "Masculino"
 
         resultado = {
-            "id": base_name.replace('_', ' ').title(),
+            "id": patient_id,
             "gender": gender,
             "totalRecords": total_records,
             "totalTime": f"{total_time} s",
