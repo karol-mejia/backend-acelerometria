@@ -56,7 +56,7 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
-        # Extraer nombre del paciente si viene en formato personalizado
+        # Extraer nombre del paciente y la actividad del nombre del archivo
         parts = base_name.replace('-', '_').split('_')
         activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
         
@@ -72,7 +72,7 @@ def analizar():
                 
         patient_id = " ".join(patient_parts).strip().title()
         if not patient_id or "Dataset" in patient_id:
-            patient_id = "Paciente Dataset"
+            patient_id = "Mejia Karol"
 
         activity_mapping = {
             'acostada': '1',
@@ -83,70 +83,48 @@ def analizar():
         }
         assigned_code = activity_mapping.get(activity_name, '1')
 
-        # LECTURA INTELIGENTE DEL ARCHIVO CSV / TXT
-        df = None
-        try:
-            file.seek(0)
-            df = pd.read_csv(file, sep=None, engine='python', comment='#', on_bad_lines='skip', header=None)
-        except Exception:
-            pass
+        # LECTURA BLINDADA: Soporte para múltiples codificaciones de texto (evita errores de bytes)
+        file.seek(0)
+        file_bytes = file.read()
+        text_data = ""
+        for enc in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+            try:
+                text_data = file_bytes.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if not text_data:
+            return jsonify({'error': 'No se pudo decodificar el archivo con ninguna codificación válida.'}), 400
 
-        if df is not None and not df.empty:
-            if df.shape[1] >= 9:
-                # Estructura del Dataset oficial (9 columnas):
-                # Col 1 (idx 0): Time, Col 2-4 (idx 1-3): Aceleraciones, Col 9 (idx 8): Label de actividad
-                new_df = pd.DataFrame()
-                new_df['time'] = pd.to_numeric(df.iloc[:, 0], errors='coerce')
-                new_df['accFrontal'] = pd.to_numeric(df.iloc[:, 1], errors='coerce')
-                new_df['accVertical'] = pd.to_numeric(df.iloc[:, 2], errors='coerce')
-                new_df['accLateral'] = pd.to_numeric(df.iloc[:, 3], errors='coerce')
-                new_df['activityCode'] = df.iloc[:, 8].astype(str).str.strip()
-                df = new_df.dropna(subset=['time', 'accFrontal', 'accVertical', 'accLateral']).reset_index(drop=True)
-            elif df.shape[1] >= 4:
-                # Estructura personalizada (4 columnas o más sin etiqueta en la col 9)
-                new_df = pd.DataFrame()
-                new_df['time'] = pd.to_numeric(df.iloc[:, 0], errors='coerce')
-                new_df['accFrontal'] = pd.to_numeric(df.iloc[:, 1], errors='coerce')
-                new_df['accVertical'] = pd.to_numeric(df.iloc[:, 2], errors='coerce')
-                new_df['accLateral'] = pd.to_numeric(df.iloc[:, 3], errors='coerce')
-                new_df['activityCode'] = assigned_code
-                df = new_df.dropna().reset_index(drop=True)
-
-        # Fallback por si acaso el archivo viene con separadores mixtos o espacios
-        if df is None or df.empty or len(df) == 0:
-            file.seek(0)
-            file_content = file.read()
-            text_data = file_content.decode('utf-8', errors='ignore') if isinstance(file_content, bytes) else str(file_content)
+        # Procesar línea por línea extrayendo números de forma segura
+        lines = text_data.splitlines()
+        data_rows = []
+        for line in lines:
+            clean_line = line.replace(',', ' ').replace(';', ' ').replace('\t', ' ')
+            tokens = clean_line.split()
             
-            lines = text_data.splitlines()
-            data_rows = []
-            for line in lines:
-                clean_line = line.replace(',', ' ').replace(';', ' ').replace('\t', ' ')
-                tokens = clean_line.split()
-                numeric_row = [float(t) for t in tokens if t.replace('.','',1).isdigit() or (t.startswith('-') and t[1:].replace('.','',1).isdigit())]
-                if len(numeric_row) >= 4:
-                    data_rows.append(numeric_row[:4])
+            numeric_row = []
+            for token in tokens:
+                token_clean = ''.join([c for c in token if c.isdigit() or c in ['.', '-']])
+                if token_clean and token_clean not in ['.', '-']:
+                    try:
+                        numeric_row.append(float(token_clean))
+                    except ValueError:
+                        continue
             
-            if len(data_rows) > 0:
-                df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
-                df['activityCode'] = assigned_code
+            if len(numeric_row) >= 4:
+                data_rows.append(numeric_row[:4])
 
-        if df is None or df.empty or len(df) == 0:
-            return jsonify({'error': 'El archivo no contiene suficientes columnas numéricas válidas.'}), 400
+        if len(data_rows) == 0:
+            return jsonify({'error': 'El archivo no contiene suficientes filas numéricas válidas.'}), 400
 
-        # Si el modelo Random Forest está disponible y no tenemos etiquetas de columna 9, aplicamos predicción
-        if modelo_rf is not None and (df['activityCode'].nunique() <= 1) and len(df) >= 100:
-            X_nuevo = extraer_caracteristicas_ventana(df)
-            if not X_nuevo.empty:
-                predicciones = modelo_rf.predict(X_nuevo)
-                activity_codes = []
-                for pred in predicciones:
-                    activity_codes.extend([str(pred)] * 100)
-                if len(activity_codes) < len(df):
-                    activity_codes.extend([str(predicciones[-1])] * (len(df) - len(activity_codes)))
-                else:
-                    activity_codes = activity_codes[:len(df)]
-                df['activityCode'] = activity_codes
+        df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
+        df['activityCode'] = assigned_code
+        
+        df = df.dropna().reset_index(drop=True)
+        if len(df) == 0:
+            return jsonify({'error': 'El archivo no contiene datos limpios.'}), 400
 
         activity_counts = df['activityCode'].value_counts().to_dict()
         total_records = len(df)
