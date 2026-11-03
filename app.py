@@ -11,7 +11,7 @@ CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend activo con datos completos de 9 columnas"})
+    return jsonify({"status": "online", "mensaje": "Backend activo con cálculo de tiempo robusto"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -30,8 +30,8 @@ def analizar():
         gender_char = base_name[-1].upper() if len(base_name) > 0 else 'F'
         gender = "Femenino" if gender_char == 'F' else "Masculino"
         
-        # Limpiar ID del paciente removiendo el carácter de género y separadores
-        patient_id_raw = base_name[:-1] if gender_char in ['F', 'M'] and base_name[-2] in ['_', '-', ' '] else base_name
+        # Limpiar ID del paciente removiendo el carácter de género final
+        patient_id_raw = base_name[:-1] if gender_char in ['F', 'M'] and len(base_name) > 1 and base_name[-2] in ['_', '-', ' '] else base_name
         patient_id = patient_id_raw.replace('_', ' ').replace('-', ' ').strip().upper()
         if not patient_id:
             patient_id = "PACIENTE 01"
@@ -69,7 +69,7 @@ def analizar():
                     except ValueError:
                         pass
             
-            # Columnas requeridas: 1(Tiempo), 2(Frontal), 3(Vertical), 4(Lateral), 9(Actividad)
+            # Columnas: 1(Tiempo), 2(Frontal), 3(Vertical), 4(Lateral), 9(Actividad)
             if len(numeric_row) >= 9:
                 t_val = numeric_row[0]
                 f_val = numeric_row[1]
@@ -87,12 +87,22 @@ def analizar():
         df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
-        start_time = df['time'].iloc[0] if 'time' in df.columns else 0
-        end_time = df['time'].iloc[-1] if 'time' in df.columns else total_records / 10.0
-        total_time = max(1, int(round(end_time - start_time)))
+        # Cálculo de tiempo robusto para evitar el error de "1 s" en miles de registros
+        try:
+            t_min = df['time'].min()
+            t_max = df['time'].max()
+            time_diff = t_max - t_min
+            if time_diff > 1:
+                total_time = int(round(time_diff))
+            else:
+                # Estimación precisa basada en frecuencia de muestreo estándar (ej. 50 Hz)
+                total_time = max(1, int(round(total_records / 50.0)))
+        except:
+            total_time = max(1, int(round(total_records / 50.0)))
 
         activity_counts = df['activityCode'].value_counts().to_dict()
 
+        # Mapeo oficial según tu especificación de Columna 9
         activity_names_map = {
             1: 'Sentado en la cama',
             2: 'Sentado en una silla',
@@ -115,7 +125,7 @@ def analizar():
             points_earned = int(est_time * pts_per_sec * 10)
             total_score += points_earned
             
-            if code_int == 4:
+            if code_int == 4: # Deambulando se considera actividad física principal
                 active_records += count
 
             act_label = activity_names_map.get(code_int, f"Actividad {code_int}")
@@ -138,7 +148,7 @@ def analizar():
             "badge": badge,
             "activePercentage": active_percentage,
             "activityBreakdown": activity_breakdown,
-            "data": df.to_dict(orient='records')  # Mantiene 'activityCode' para que el gráfico filtre correctamente
+            "data": df.to_dict(orient='records')
         }
 
         return jsonify(resultado)
