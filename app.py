@@ -1,4 +1,5 @@
 import os
+import re
 import joblib
 import pandas as pd
 import numpy as np
@@ -56,8 +57,8 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
-        # Extraer nombre del paciente y la actividad del nombre del archivo
-        parts = base_name.replace('-', '_').split('_')
+        # Separar por espacios, guiones bajos o guiones medios de forma inteligente
+        parts = re.split(r'[_\s-]+', base_name)
         activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
         
         activity_name = "general"
@@ -67,7 +68,7 @@ def analizar():
             part_lower = part.strip().lower()
             if part_lower in activity_keywords:
                 activity_name = part_lower
-            else:
+            elif part_lower:
                 patient_parts.append(part.strip())
                 
         patient_id = " ".join(patient_parts).strip().title()
@@ -83,7 +84,7 @@ def analizar():
         }
         assigned_code = activity_mapping.get(activity_name, '1')
 
-        # LECTURA BLINDADA: Soporte para múltiples codificaciones de texto (evita errores de bytes)
+        # LECTURA BLINDADA
         file.seek(0)
         file_bytes = file.read()
         text_data = ""
@@ -95,9 +96,8 @@ def analizar():
                 continue
         
         if not text_data:
-            return jsonify({'error': 'No se pudo decodificar el archivo con ninguna codificación válida.'}), 400
+            return jsonify({'error': 'No se pudo decodificar el archivo.'}), 400
 
-        # Procesar línea por línea extrayendo números de forma segura
         lines = text_data.splitlines()
         data_rows = []
         for line in lines:
