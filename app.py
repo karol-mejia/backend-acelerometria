@@ -9,12 +9,6 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-MODEL_PATH = 'modelo_random_forest.pkl'
-if os.path.exists(MODEL_PATH):
-    modelo_rf = joblib.load(MODEL_PATH)
-else:
-    modelo_rf = None
-
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({"status": "online", "mensaje": "Backend activo"})
@@ -32,21 +26,24 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
-        # Limpieza inteligente: extraer nombre del paciente eliminando palabras clave de postura
-        activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
-        parts = re.split(r'[_\s-]+', base_name)
+        # Palabras de actividad a remover estrictamente del ID del paciente
+        activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar', 'bípeda']
         
+        lower_base = base_name.lower()
         detected_activity = "General"
-        patient_parts = []
-        for part in parts:
-            p_lower = part.strip().lower()
-            if p_lower in activity_keywords:
-                detected_activity = p_lower.capitalize()
-            elif p_lower and not p_lower.isdigit():
-                patient_parts.append(part.strip())
+        for kw in activity_keywords:
+            if kw in lower_base:
+                detected_activity = kw.capitalize()
+                break
                 
-        # Unificar nombre base (ej. "Mejia Karol")
-        patient_id = " ".join(patient_parts).strip().title()
+        # Construir nombre limpio sin palabras de postura ni números
+        clean_words = []
+        for word in re.split(r'[_\s-]+', base_name):
+            w_low = word.strip().lower()
+            if w_low not in activity_keywords and not w_low.isdigit():
+                clean_words.append(word.strip())
+                
+        patient_id = " ".join(clean_words).strip().title()
         if not patient_id or len(patient_id) < 3:
             patient_id = "Mejia Karol"
 
@@ -86,7 +83,7 @@ def analizar():
                 data_rows.append([len(data_rows)*0.1, numeric_row[0], numeric_row[1], numeric_row[2]])
 
         if len(data_rows) == 0:
-            return jsonify({'error': 'El archivo no contiene suficientes filas numéricas válidas.'}), 400
+            return jsonify({'error': 'El archivo no contiene filas numéricas válidas.'}), 400
 
         df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
         df = df.dropna().reset_index(drop=True)
@@ -96,8 +93,8 @@ def analizar():
         end_time = df['time'].iloc[-1] if 'time' in df.columns else total_records / 10.0
         total_time = max(1, int(round(end_time - start_time)))
 
-        score = int(total_time * 35 if detected_activity in ['Bípeda', 'Marcha', 'Caminar'] else total_time * 15)
-        active_percentage = 100.0 if detected_activity in ['Bípeda', 'Marcha', 'Caminar'] else 10.0
+        score = int(total_time * 35 if detected_activity in ['Bípeda', 'Marcha', 'Caminar', 'Bipeda'] else total_time * 15)
+        active_percentage = 100.0 if detected_activity in ['Bípeda', 'Marcha', 'Caminar', 'Bipeda'] else 10.0
 
         activity_breakdown = [{
             "activity": f"Actividad: {detected_activity}",
@@ -107,7 +104,7 @@ def analizar():
         }]
 
         badge = "Oro (Nivel Avanzado)" if score > 1500 else ("Plata (Nivel Intermedio)" if score > 800 else "Bronce (Nivel Iniciador)")
-        gender = "Femenino" if 'karol' in patient_id.lower() or 'f' in base_name.lower() else "Masculino"
+        gender = "Femenino" if 'karol' in patient_id.lower() or 'f' in lower_base else "Masculino"
 
         resultado = {
             "id": patient_id,
