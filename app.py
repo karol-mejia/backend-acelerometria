@@ -1,6 +1,5 @@
 import os
 import re
-import joblib
 import pandas as pd
 import numpy as np
 from flask import Flask, request, jsonify
@@ -11,7 +10,7 @@ CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend activo con cálculo de tiempo robusto"})
+    return jsonify({"status": "online", "mensaje": "Backend activo y optimizado"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -52,7 +51,12 @@ def analizar():
 
         lines = text_data.splitlines()
         data_rows = []
+        
         for line in lines:
+            if not line.strip():
+                continue
+            
+            # Separar por comas, punto y coma o tabulaciones (CSV)
             if ',' in line:
                 tokens = [t.strip() for t in line.split(',')]
             elif ';' in line:
@@ -60,49 +64,54 @@ def analizar():
             else:
                 tokens = line.split()
             
-            numeric_row = []
-            for token in tokens:
-                token_clean = ''.join([c for c in token if c.isdigit() or c in ['.', '-']])
-                if token_clean and token_clean not in ['.', '-']:
-                    try:
-                        numeric_row.append(float(token_clean))
-                    except ValueError:
-                        pass
-            
-            # Columnas: 1(Tiempo), 2(Frontal), 3(Vertical), 4(Lateral), 9(Actividad)
-            if len(numeric_row) >= 9:
-                t_val = numeric_row[0]
-                f_val = numeric_row[1]
-                v_val = numeric_row[2]
-                l_val = numeric_row[3]
-                act_val = int(numeric_row[8])
-                data_rows.append([t_val, f_val, v_val, l_val, act_val])
-            elif len(numeric_row) >= 4:
-                data_rows.append([numeric_row[0], numeric_row[1], numeric_row[2], numeric_row[3], 1])
+            try:
+                # Asegurar lectura estricta de las columnas requeridas:
+                # Columna 1 (índice 0): Tiempo
+                # Columna 2 (índice 1): Aceleración frontal
+                # Columna 3 (índice 2): Aceleración vertical
+                # Columna 4 (índice 3): Aceleración lateral
+                # Columna 9 (índice 8): Etiqueta de actividad (1, 2, 3, 4)
+                if len(tokens) >= 9:
+                    t_val = float(tokens[0])
+                    f_val = float(tokens[1])
+                    v_val = float(tokens[2])
+                    l_val = float(tokens[3])
+                    act_val = int(float(tokens[8]))
+                    data_rows.append([t_val, f_val, v_val, l_val, act_val])
+            except ValueError:
+                # Omite cabeceras de texto u otras filas no numéricas
+                continue
 
         if len(data_rows) == 0:
-            return jsonify({'error': 'El archivo no contiene suficientes filas válidas.'}), 400
+            return jsonify({'error': 'El archivo no contiene filas numéricas válidas con el formato de 9 columnas.'}), 400
 
         df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral', 'activityCode'])
         df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
-        # Cálculo de tiempo robusto para evitar el error de "1 s" en miles de registros
-        try:
-            t_min = df['time'].min()
-            t_max = df['time'].max()
-            time_diff = t_max - t_min
-            if time_diff > 1:
-                total_time = int(round(time_diff))
-            else:
-                # Estimación precisa basada en frecuencia de muestreo estándar (ej. 50 Hz)
-                total_time = max(1, int(round(total_records / 50.0)))
-        except:
-            total_time = max(1, int(round(total_records / 50.0)))
+        # Normalización y cálculo preciso del tiempo en segundos
+        t_min = df['time'].min()
+        t_max = df['time'].max()
+        raw_duration = t_max - t_min
 
+        if raw_duration > 10000:
+            # Si el tiempo viene en milisegundos
+            total_time = int(round(raw_duration / 1000.0))
+            df['time'] = ((df['time'] - t_min) / 1000.0).round(1)
+        elif raw_duration > 0:
+            # Si el tiempo viene en segundos directos
+            total_time = int(round(raw_duration))
+            df['time'] = (df['time'] - t_min).round(1)
+        else:
+            # Respaldo si los tiempos son estáticos o cero (asumiendo 50 Hz)
+            total_time = max(1, int(round(total_records / 50.0)))
+            df['time'] = [round(i / 50.0, 1) for i in range(total_records)]
+
+        total_time = max(1, total_time)
+
+        # Conteo exacto basado en la Columna 9 (activityCode)
         activity_counts = df['activityCode'].value_counts().to_dict()
 
-        # Mapeo oficial según tu especificación de Columna 9
         activity_names_map = {
             1: 'Sentado en la cama',
             2: 'Sentado en una silla',
@@ -114,9 +123,15 @@ def analizar():
         total_score = 0
         active_records = 0
 
-        pts_config = {1: 0.5, 2: 0.5, 3: 0.2, 4: 3.0}
+        # Puntos por segundo según la actividad
+        pts_config = {
+            1: 0.5,
+            2: 0.5,
+            3: 0.2,
+            4: 3.0
+        }
 
-        for code, count in activity_counts.items():
+        for code, count in sorted(activity_counts.items()):
             code_int = int(code)
             percentage = round((count / total_records) * 100, 1)
             est_time = max(1, int(round((count / total_records) * total_time)))
@@ -125,7 +140,7 @@ def analizar():
             points_earned = int(est_time * pts_per_sec * 10)
             total_score += points_earned
             
-            if code_int == 4: # Deambulando se considera actividad física principal
+            if code_int == 4: # Deambulando se considera actividad activa
                 active_records += count
 
             act_label = activity_names_map.get(code_int, f"Actividad {code_int}")
