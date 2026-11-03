@@ -57,30 +57,57 @@ def analizar():
         file = request.files['file']
         filename = file.filename
         
-        # 2. LECTURA SEGURA DEL ARCHIVO CSV O TXT
+        # 2. LECTURA ULTRA-ROBUSTA: Soporta cualquier separador (comas, tabs, espacios múltiples, etc.)
+        df = None
         try:
-            df = pd.read_csv(file, sep=None, engine='python', comment='#')
+            file.seek(0)
+            df = pd.read_csv(file, sep=None, engine='python', comment='#', on_bad_lines='skip')
         except Exception:
+            pass
+
+        # Si pandas estándar no logra estructurarlo, leemos línea por línea extrayendo números
+        if df is None or df.empty or df.shape[1] < 4:
             file.seek(0)
-            df = pd.read_csv(file, header=None, sep=',', engine='python', on_bad_lines='skip')
+            try:
+                file_content = file.read()
+                if isinstance(file_content, bytes):
+                    text_data = file_content.decode('utf-8', errors='ignore')
+                else:
+                    text_data = str(file_content)
+                
+                lines = text_data.splitlines()
+                data_rows = []
+                for line in lines:
+                    clean_line = line.replace(',', ' ').replace(';', ' ').replace('\t', ' ')
+                    tokens = clean_line.split()
+                    
+                    numeric_row = []
+                    for token in tokens:
+                        try:
+                            numeric_row.append(float(token))
+                        except ValueError:
+                            continue
+                    
+                    if len(numeric_row) >= 4:
+                        data_rows.append(numeric_row[:4])
+                
+                if len(data_rows) > 0:
+                    df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
+            except Exception as parse_err:
+                return jsonify({'error': f'No se pudo interpretar el formato del archivo: {str(parse_err)}'}), 400
 
-        if df.shape[1] < 4:
-            file.seek(0)
-            df = pd.read_csv(file, header=None, sep=None, engine='python', on_bad_lines='skip')
+        if df is None or df.empty or df.shape[1] < 4:
+            return jsonify({'error': 'El archivo no contiene suficientes columnas numéricas válidas.'}), 400
 
-        if df.shape[1] >= 4:
-            df = df.iloc[:, :4]
-            df.columns = ['time', 'accFrontal', 'accVertical', 'accLateral']
-        else:
-            return jsonify({'error': 'El archivo no tiene las columnas esperadas'}), 400
-
-        # Limpiar valores no numéricos
+        # Normalizar columnas y limpiar datos
+        df = df.iloc[:, :4]
+        df.columns = ['time', 'accFrontal', 'accVertical', 'accLateral']
         for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df = df.dropna().reset_index(drop=True)
 
         if len(df) == 0:
-            return jsonify({'error': 'El archivo no contiene datos numéricos válidos.'}), 400
+            return jsonify({'error': 'El archivo no contiene datos numéricos limpios.'}), 400
 
         # 3. APLICAR EL MODELO RANDOM FOREST SI ESTÁ DISPONIBLE
         if modelo_rf is not None and len(df) >= 100:
