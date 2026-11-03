@@ -8,7 +8,7 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)  # Permite la comunicación con tu página web
 
-# 1. CARGAR EL MODELO RANDOM FOREST AL INICIAR EL SERVIDOR
+# CARGAR EL MODELO RANDOM FOREST AL INICIAR EL SERVIDOR
 MODEL_PATH = 'modelo_random_forest.pkl'
 if os.path.exists(MODEL_PATH):
     modelo_rf = joblib.load(MODEL_PATH)
@@ -25,9 +25,6 @@ def home():
     })
 
 def extraer_caracteristicas_ventana(df_acelerometria):
-    """
-    Agrupa las señales en ventanas de tiempo y extrae estadísticos para el modelo.
-    """
     ventana_tamanio = 100
     caracteristicas = []
     
@@ -57,7 +54,28 @@ def analizar():
         file = request.files['file']
         filename = file.filename
         
-        # 2. LECTURA ULTRA-ROBUSTA: Soporta cualquier separador (comas, tabs, espacios múltiples, etc.)
+        # Extraer nombre del paciente y actividad del nombre del archivo (ej: Mejia Karol_sentada.txt)
+        base_name = os.path.splitext(filename)[0]
+        parts = base_name.replace('-', '_').split('_')
+        
+        if len(parts) >= 2:
+            activity_name = parts[-1].strip().lower()
+            patient_id = " ".join(parts[:-1]).strip().title()
+        else:
+            patient_id = base_name.strip().title()
+            activity_name = "general"
+
+        # Mapear nombre de actividad a código estándar
+        activity_mapping = {
+            'acostada': '1',
+            'sentada': '2',
+            'bipeda': '3',
+            'marcha': '4',
+            'caminar': '4'
+        }
+        assigned_code = activity_mapping.get(activity_name, '1')
+
+        # LECTURA ULTRA-ROBUSTA: Soporta cualquier separador (comas, tabs, espacios, etc.)
         df = None
         try:
             file.seek(0)
@@ -65,7 +83,6 @@ def analizar():
         except Exception:
             pass
 
-        # Si pandas estándar no logra estructurarlo, leemos línea por línea extrayendo números
         if df is None or df.empty or df.shape[1] < 4:
             file.seek(0)
             try:
@@ -99,7 +116,6 @@ def analizar():
         if df is None or df.empty or df.shape[1] < 4:
             return jsonify({'error': 'El archivo no contiene suficientes columnas numéricas válidas.'}), 400
 
-        # Normalizar columnas y limpiar datos
         df = df.iloc[:, :4]
         df.columns = ['time', 'accFrontal', 'accVertical', 'accLateral']
         for col in df.columns:
@@ -109,12 +125,11 @@ def analizar():
         if len(df) == 0:
             return jsonify({'error': 'El archivo no contiene datos numéricos limpios.'}), 400
 
-        # 3. APLICAR EL MODELO RANDOM FOREST SI ESTÁ DISPONIBLE
+        # Aplicar modelo Random Forest o asignar código por nombre de archivo
         if modelo_rf is not None and len(df) >= 100:
             X_nuevo = extraer_caracteristicas_ventana(df)
             if not X_nuevo.empty:
                 predicciones = modelo_rf.predict(X_nuevo)
-                
                 activity_codes = []
                 for pred in predicciones:
                     activity_codes.extend([str(pred)] * 100)
@@ -123,14 +138,12 @@ def analizar():
                     activity_codes.extend([str(predicciones[-1])] * (len(df) - len(activity_codes)))
                 else:
                     activity_codes = activity_codes[:len(df)]
-                    
                 df['activityCode'] = activity_codes
             else:
-                df['activityCode'] = '1'
+                df['activityCode'] = assigned_code
         else:
-            df['activityCode'] = '1'
+            df['activityCode'] = assigned_code
 
-        # 4. CALCULAR ESTADÍSTICAS PARA EL FRONTEND
         activity_counts = df['activityCode'].value_counts().to_dict()
         total_records = len(df)
         
@@ -138,9 +151,7 @@ def analizar():
         end_time = df['time'].iloc[-1] if 'time' in df.columns else total_records / 10.0
         total_time = max(1, int(round(end_time - start_time)))
 
-        patient_id = os.path.splitext(filename)[0]
-        lower_name = patient_id.lower()
-        gender = "Femenino" if any(n in lower_name for n in ['karol', 'maria', 'ana']) else "Masculino"
+        gender = "Femenino" if any(n in patient_id.lower() for n in ['karol', 'maria', 'ana']) else "Masculino"
 
         pts_config = {'1': 0.5, '2': 0.0, '3': 2.0, '4': 2.0}
         score = 0
@@ -176,3 +187,4 @@ def analizar():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
