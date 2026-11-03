@@ -20,7 +20,7 @@ else:
 def home():
     return jsonify({
         "status": "online",
-        "mensaje": "¡El backend de acelerometría y Random Forest está funcionando correctamente!"
+        "mensaje": "¡El backend de acelerometría está funcionando correctamente!"
     })
 
 def extraer_caracteristicas_ventana(df_acelerometria):
@@ -56,6 +56,7 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
+        # Extraer nombre del paciente si viene en formato personalizado
         parts = base_name.replace('-', '_').split('_')
         activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
         
@@ -70,8 +71,8 @@ def analizar():
                 patient_parts.append(part.strip())
                 
         patient_id = " ".join(patient_parts).strip().title()
-        if not patient_id:
-            patient_id = base_name.strip().title()
+        if not patient_id or "Dataset" in patient_id:
+            patient_id = "Paciente Dataset"
 
         activity_mapping = {
             'acostada': '1',
@@ -82,57 +83,70 @@ def analizar():
         }
         assigned_code = activity_mapping.get(activity_name, '1')
 
-        # LECTURA ULTRA-ROBUSTA
+        # LECTURA INTELIGENTE DEL ARCHIVO CSV / TXT
         df = None
         try:
             file.seek(0)
-            df = pd.read_csv(file, sep=None, engine='python', comment='#', on_bad_lines='skip')
+            df = pd.read_csv(file, sep=None, engine='python', comment='#', on_bad_lines='skip', header=None)
         except Exception:
             pass
 
-        if df is None or df.empty or df.shape[1] < 4:
-            file.seek(0)
-            try:
-                file_content = file.read()
-                if isinstance(file_content, bytes):
-                    text_data = file_content.decode('utf-8', errors='ignore')
-                else:
-                    text_data = str(file_content)
-                
-                lines = text_data.splitlines()
-                data_rows = []
-                for line in lines:
-                    clean_line = line.replace(',', ' ').replace(';', ' ').replace('\t', ' ')
-                    tokens = clean_line.split()
-                    
-                    numeric_row = []
-                    for token in tokens:
-                        try:
-                            numeric_row.append(float(token))
-                        except ValueError:
-                            continue
-                    
-                    if len(numeric_row) >= 4:
-                        data_rows.append(numeric_row[:4])
-                
-                if len(data_rows) > 0:
-                    df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
-            except Exception:
-                pass
+        if df is not None and not df.empty:
+            if df.shape[1] >= 9:
+                # Estructura del Dataset oficial (9 columnas):
+                # Col 1 (idx 0): Time, Col 2-4 (idx 1-3): Aceleraciones, Col 9 (idx 8): Label de actividad
+                new_df = pd.DataFrame()
+                new_df['time'] = pd.to_numeric(df.iloc[:, 0], errors='coerce')
+                new_df['accFrontal'] = pd.to_numeric(df.iloc[:, 1], errors='coerce')
+                new_df['accVertical'] = pd.to_numeric(df.iloc[:, 2], errors='coerce')
+                new_df['accLateral'] = pd.to_numeric(df.iloc[:, 3], errors='coerce')
+                new_df['activityCode'] = df.iloc[:, 8].astype(str).str.strip()
+                df = new_df.dropna(subset=['time', 'accFrontal', 'accVertical', 'accLateral']).reset_index(drop=True)
+            elif df.shape[1] >= 4:
+                # Estructura personalizada (4 columnas o más sin etiqueta en la col 9)
+                new_df = pd.DataFrame()
+                new_df['time'] = pd.to_numeric(df.iloc[:, 0], errors='coerce')
+                new_df['accFrontal'] = pd.to_numeric(df.iloc[:, 1], errors='coerce')
+                new_df['accVertical'] = pd.to_numeric(df.iloc[:, 2], errors='coerce')
+                new_df['accLateral'] = pd.to_numeric(df.iloc[:, 3], errors='coerce')
+                new_df['activityCode'] = assigned_code
+                df = new_df.dropna().reset_index(drop=True)
 
-        if df is None or df.empty or df.shape[1] < 4:
+        # Fallback por si acaso el archivo viene con separadores mixtos o espacios
+        if df is None or df.empty or len(df) == 0:
+            file.seek(0)
+            file_content = file.read()
+            text_data = file_content.decode('utf-8', errors='ignore') if isinstance(file_content, bytes) else str(file_content)
+            
+            lines = text_data.splitlines()
+            data_rows = []
+            for line in lines:
+                clean_line = line.replace(',', ' ').replace(';', ' ').replace('\t', ' ')
+                tokens = clean_line.split()
+                numeric_row = [float(t) for t in tokens if t.replace('.','',1).isdigit() or (t.startswith('-') and t[1:].replace('.','',1).isdigit())]
+                if len(numeric_row) >= 4:
+                    data_rows.append(numeric_row[:4])
+            
+            if len(data_rows) > 0:
+                df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
+                df['activityCode'] = assigned_code
+
+        if df is None or df.empty or len(df) == 0:
             return jsonify({'error': 'El archivo no contiene suficientes columnas numéricas válidas.'}), 400
 
-        df = df.iloc[:, :4]
-        df.columns = ['time', 'accFrontal', 'accVertical', 'accLateral']
-        for col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        df = df.dropna().reset_index(drop=True)
-
-        if len(df) == 0:
-            return jsonify({'error': 'El archivo no contiene datos numéricos limpios.'}), 400
-
-        df['activityCode'] = assigned_code
+        # Si el modelo Random Forest está disponible y no tenemos etiquetas de columna 9, aplicamos predicción
+        if modelo_rf is not None and (df['activityCode'].nunique() <= 1) and len(df) >= 100:
+            X_nuevo = extraer_caracteristicas_ventana(df)
+            if not X_nuevo.empty:
+                predicciones = modelo_rf.predict(X_nuevo)
+                activity_codes = []
+                for pred in predicciones:
+                    activity_codes.extend([str(pred)] * 100)
+                if len(activity_codes) < len(df):
+                    activity_codes.extend([str(predicciones[-1])] * (len(df) - len(activity_codes)))
+                else:
+                    activity_codes = activity_codes[:len(df)]
+                df['activityCode'] = activity_codes
 
         activity_counts = df['activityCode'].value_counts().to_dict()
         total_records = len(df)
@@ -148,10 +162,10 @@ def analizar():
         active_records = 0
         
         for code, count in activity_counts.items():
-            pts_per_sec = pts_config.get(code, 0.5)
+            pts_per_sec = pts_config.get(str(code), 0.5)
             time_fraction = count / total_records
             score += (time_fraction * total_time) * pts_per_sec
-            if code == '3' or code == '4':
+            if str(code) in ['3', '4']:
                 active_records += count
 
         score = int(round(score))
