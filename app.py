@@ -32,24 +32,25 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
-        # Extraer nombre del paciente y la actividad del nombre del archivo
-        lower_base = base_name.lower()
+        # Limpieza inteligente: extraer nombre del paciente eliminando palabras clave de postura
         activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
+        parts = re.split(r'[_\s-]+', base_name)
         
         detected_activity = "General"
         patient_parts = []
-        for part in re.split(r'[_\s-]+', base_name):
+        for part in parts:
             p_lower = part.strip().lower()
             if p_lower in activity_keywords:
                 detected_activity = p_lower.capitalize()
-            elif p_lower:
+            elif p_lower and not p_lower.isdigit():
                 patient_parts.append(part.strip())
                 
+        # Unificar nombre base (ej. "Mejia Karol")
         patient_id = " ".join(patient_parts).strip().title()
         if not patient_id or len(patient_id) < 3:
             patient_id = "Mejia Karol"
 
-        # Lectura robusta
+        # Lectura robusta del archivo
         file.seek(0)
         file_bytes = file.read()
         text_data = ""
@@ -95,25 +96,18 @@ def analizar():
         end_time = df['time'].iloc[-1] if 'time' in df.columns else total_records / 10.0
         total_time = max(1, int(round(end_time - start_time)))
 
-        # Puntos y factor según la actividad detectada
-        pts_multiplier = 35 if detected_activity in ['Bípeda', 'Marcha', 'Caminar'] else 15
-        score = int(total_time * pts_multiplier)
+        score = int(total_time * 35 if detected_activity in ['Bípeda', 'Marcha', 'Caminar'] else total_time * 15)
         active_percentage = 100.0 if detected_activity in ['Bípeda', 'Marcha', 'Caminar'] else 10.0
 
         activity_breakdown = [{
-            "activity": f"Actividad - {detected_activity}",
+            "activity": f"Actividad: {detected_activity}",
             "time": f"{total_time} s",
-            "percentage": "100.0%",
+            "percentage": f"{active_percentage}%",
             "points": f"+{score} pts"
         }]
 
-        badge = "Bronce (Nivel Iniciador)"
-        if score > 1500:
-            badge = "Oro (Nivel Avanzado)"
-        elif score > 800:
-            badge = "Plata (Nivel Intermedio)"
-
-        gender = "Femenino" if 'karol' in patient_id.lower() or 'f' in lower_base else "Masculino"
+        badge = "Oro (Nivel Avanzado)" if score > 1500 else ("Plata (Nivel Intermedio)" if score > 800 else "Bronce (Nivel Iniciador)")
+        gender = "Femenino" if 'karol' in patient_id.lower() or 'f' in base_name.lower() else "Masculino"
 
         resultado = {
             "id": patient_id,
