@@ -10,7 +10,7 @@ CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend activo y optimizado"})
+    return jsonify({"status": "online", "mensaje": "Backend activo con Porcentaje Activo Ponderado"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -56,7 +56,6 @@ def analizar():
             if not line.strip():
                 continue
             
-            # Separar por comas, punto y coma o tabulaciones (CSV)
             if ',' in line:
                 tokens = [t.strip() for t in line.split(',')]
             elif ';' in line:
@@ -65,12 +64,7 @@ def analizar():
                 tokens = line.split()
             
             try:
-                # Asegurar lectura estricta de las columnas requeridas:
-                # Columna 1 (índice 0): Tiempo
-                # Columna 2 (índice 1): Aceleración frontal
-                # Columna 3 (índice 2): Aceleración vertical
-                # Columna 4 (índice 3): Aceleración lateral
-                # Columna 9 (índice 8): Etiqueta de actividad (1, 2, 3, 4)
+                # Columnas: 1(Tiempo), 2(Frontal), 3(Vertical), 4(Lateral), 9(Actividad)
                 if len(tokens) >= 9:
                     t_val = float(tokens[0])
                     f_val = float(tokens[1])
@@ -79,7 +73,6 @@ def analizar():
                     act_val = int(float(tokens[8]))
                     data_rows.append([t_val, f_val, v_val, l_val, act_val])
             except ValueError:
-                # Omite cabeceras de texto u otras filas no numéricas
                 continue
 
         if len(data_rows) == 0:
@@ -89,27 +82,23 @@ def analizar():
         df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
-        # Normalización y cálculo preciso del tiempo en segundos
+        # Normalización y cálculo del tiempo en segundos
         t_min = df['time'].min()
         t_max = df['time'].max()
         raw_duration = t_max - t_min
 
         if raw_duration > 10000:
-            # Si el tiempo viene en milisegundos
             total_time = int(round(raw_duration / 1000.0))
             df['time'] = ((df['time'] - t_min) / 1000.0).round(1)
         elif raw_duration > 0:
-            # Si el tiempo viene en segundos directos
             total_time = int(round(raw_duration))
             df['time'] = (df['time'] - t_min).round(1)
         else:
-            # Respaldo si los tiempos son estáticos o cero (asumiendo 50 Hz)
             total_time = max(1, int(round(total_records / 50.0)))
             df['time'] = [round(i / 50.0, 1) for i in range(total_records)]
 
         total_time = max(1, total_time)
 
-        # Conteo exacto basado en la Columna 9 (activityCode)
         activity_counts = df['activityCode'].value_counts().to_dict()
 
         activity_names_map = {
@@ -119,15 +108,22 @@ def analizar():
             4: 'Deambulando'
         }
 
+        # Factores de intensidad actualizados para que todas las actividades sumen
+        intensity_weights = {
+            1: 0.3,  # Sentado en la cama
+            2: 0.5,  # Sentado en una silla
+            3: 0.1,  # Acostado (ahora aporta un valor base mayor a 0)
+            4: 1.0   # Deambulando
+        }
+
         activity_breakdown = []
         total_score = 0
-        active_records = 0
+        weighted_activity_sum = 0
 
-        # Puntos por segundo según la actividad
         pts_config = {
             1: 0.5,
             2: 0.5,
-            3: 0.2,
+            3: 0.1,
             4: 3.0
         }
 
@@ -140,8 +136,9 @@ def analizar():
             points_earned = int(est_time * pts_per_sec * 10)
             total_score += points_earned
             
-            if code_int == 4: # Deambulando se considera actividad activa
-                active_records += count
+            # Acumular peso de intensidad para el porcentaje activo global
+            weight = intensity_weights.get(code_int, 0.0)
+            weighted_activity_sum += count * weight
 
             act_label = activity_names_map.get(code_int, f"Actividad {code_int}")
             activity_breakdown.append({
@@ -151,7 +148,8 @@ def analizar():
                 "points": f"+{points_earned} pts"
             })
 
-        active_percentage = float(round((active_records / total_records) * 100, 1))
+        # Porcentaje activo basado en la ponderación acumulada de intensidad
+        active_percentage = float(round((weighted_activity_sum / total_records) * 100, 1))
         badge = "Oro (Nivel Avanzado)" if total_score > 1500 else ("Plata (Nivel Intermedio)" if total_score > 800 else "Bronce (Nivel Iniciador)")
 
         resultado = {
