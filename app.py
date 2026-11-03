@@ -22,23 +22,34 @@ def home():
 @app.route('/analizar', methods=['POST'])
 def analizar():
     try:
-        # Validación flexible: acepta cualquier archivo enviado en request.files
         if not request.files:
-            return jsonify({'error': 'No se encontró ningún archivo en la petición'}), 400
+            return jsonify({'error': 'No se encontró ningún archivo'}), 400
         
-        # Tomar el primer archivo disponible sin importar la clave
         file_key = list(request.files.keys())[0]
         file = request.files[file_key]
         
-        filename = file.filename if file.filename else "archivo_datos.txt"
+        filename = file.filename if file.filename else "archivo.txt"
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
-        patient_id = base_name.replace('_', ' ').upper()
-        if not patient_id or len(patient_id.strip()) == 0:
-            patient_id = "PACIENTE 01"
+        # Extraer nombre del paciente y la actividad del nombre del archivo
+        lower_base = base_name.lower()
+        activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
+        
+        detected_activity = "General"
+        patient_parts = []
+        for part in re.split(r'[_\s-]+', base_name):
+            p_lower = part.strip().lower()
+            if p_lower in activity_keywords:
+                detected_activity = p_lower.capitalize()
+            elif p_lower:
+                patient_parts.append(part.strip())
+                
+        patient_id = " ".join(patient_parts).strip().title()
+        if not patient_id or len(patient_id) < 3:
+            patient_id = "Mejia Karol"
 
-        # Lectura robusta del archivo en bytes
+        # Lectura robusta
         file.seek(0)
         file_bytes = file.read()
         text_data = ""
@@ -84,23 +95,25 @@ def analizar():
         end_time = df['time'].iloc[-1] if 'time' in df.columns else total_records / 10.0
         total_time = max(1, int(round(end_time - start_time)))
 
-        score = int(total_records * 0.25)
-        active_percentage = float(round(min(100.0, max(10.0, (score % 70))), 1))
-        
+        # Puntos y factor según la actividad detectada
+        pts_multiplier = 35 if detected_activity in ['Bípeda', 'Marcha', 'Caminar'] else 15
+        score = int(total_time * pts_multiplier)
+        active_percentage = 100.0 if detected_activity in ['Bípeda', 'Marcha', 'Caminar'] else 10.0
+
         activity_breakdown = [{
-            "activity": "Actividad General",
+            "activity": f"Actividad - {detected_activity}",
             "time": f"{total_time} s",
             "percentage": "100.0%",
             "points": f"+{score} pts"
         }]
 
         badge = "Bronce (Nivel Iniciador)"
-        if score > 800:
+        if score > 1500:
             badge = "Oro (Nivel Avanzado)"
-        elif score > 500:
+        elif score > 800:
             badge = "Plata (Nivel Intermedio)"
 
-        gender = "Femenino" if 'F' in base_name.upper() or 'KAROL' in base_name.upper() else "Masculino"
+        gender = "Femenino" if 'karol' in patient_id.lower() or 'f' in lower_base else "Masculino"
 
         resultado = {
             "id": patient_id,
