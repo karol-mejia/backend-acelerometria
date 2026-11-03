@@ -54,18 +54,31 @@ def analizar():
         file = request.files['file']
         filename = file.filename
         
-        # Extraer nombre del paciente y actividad del nombre del archivo (ej: Mejia Karol_sentada.txt)
-        base_name = os.path.splitext(filename)[0]
+        # Limpiar ruta en caso de que venga dentro de carpetas en el ZIP
+        clean_filename = filename.split('/')[-1].split('\\')[-1]
+        base_name = os.path.splitext(clean_filename)[0]
+        
         parts = base_name.replace('-', '_').split('_')
         
-        if len(parts) >= 2:
-            activity_name = parts[-1].strip().lower()
-            patient_id = " ".join(parts[:-1]).strip().title()
-        else:
+        # Palabras clave de actividades para separar del nombre del paciente
+        activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
+        
+        activity_name = "general"
+        patient_parts = []
+        
+        for part in parts:
+            part_lower = part.strip().lower()
+            if part_lower in activity_keywords:
+                activity_name = part_lower
+            else:
+                patient_parts.append(part.strip())
+                
+        # Construir el nombre limpio del paciente (ej. "Mejia Karol")
+        patient_id = " ".join(patient_parts).strip().title()
+        if not patient_id:
             patient_id = base_name.strip().title()
-            activity_name = "general"
 
-        # Mapear nombre de actividad a código estándar
+        # Mapear actividad a código numérico
         activity_mapping = {
             'acostada': '1',
             'sentada': '2',
@@ -75,7 +88,7 @@ def analizar():
         }
         assigned_code = activity_mapping.get(activity_name, '1')
 
-        # LECTURA ULTRA-ROBUSTA: Soporta cualquier separador (comas, tabs, espacios, etc.)
+        # LECTURA ULTRA-ROBUSTA: Soporta cualquier separador
         df = None
         try:
             file.seek(0)
@@ -125,24 +138,8 @@ def analizar():
         if len(df) == 0:
             return jsonify({'error': 'El archivo no contiene datos numéricos limpios.'}), 400
 
-        # Aplicar modelo Random Forest o asignar código por nombre de archivo
-        if modelo_rf is not None and len(df) >= 100:
-            X_nuevo = extraer_caracteristicas_ventana(df)
-            if not X_nuevo.empty:
-                predicciones = modelo_rf.predict(X_nuevo)
-                activity_codes = []
-                for pred in predicciones:
-                    activity_codes.extend([str(pred)] * 100)
-                
-                if len(activity_codes) < len(df):
-                    activity_codes.extend([str(predicciones[-1])] * (len(df) - len(activity_codes)))
-                else:
-                    activity_codes = activity_codes[:len(df)]
-                df['activityCode'] = activity_codes
-            else:
-                df['activityCode'] = assigned_code
-        else:
-            df['activityCode'] = assigned_code
+        # Asignar código de actividad a este bloque de datos específico
+        df['activityCode'] = assigned_code
 
         activity_counts = df['activityCode'].value_counts().to_dict()
         total_records = len(df)
@@ -187,4 +184,3 @@ def analizar():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-
