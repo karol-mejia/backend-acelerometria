@@ -57,22 +57,29 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
-        # Separar por espacios, guiones bajos o guiones medios de forma inteligente
         parts = re.split(r'[_\s-]+', base_name)
         activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
         
         activity_name = "general"
         patient_parts = []
+        age = 21       # Valor por defecto o extraíble
+        weight = 58.0  # Valor por defecto o extraíble (kg)
         
         for part in parts:
             part_lower = part.strip().lower()
             if part_lower in activity_keywords:
                 activity_name = part_lower
+            elif 'anos' in part_lower or ' años' in part_lower:
+                nums = ''.join([c for c in part_lower if c.isdigit()])
+                if nums: age = int(nums)
+            elif 'kg' in part_lower:
+                nums = ''.join([c for c in part_lower if c.isdigit() or c == '.'])
+                if nums: weight = float(nums)
             elif part_lower:
                 patient_parts.append(part.strip())
                 
         patient_id = " ".join(patient_parts).strip().title()
-        if not patient_id or "Dataset" in patient_id:
+        if not patient_id or "Dataset" in patient_id or "Datos" in patient_id:
             patient_id = "Mejia Karol"
 
         activity_mapping = {
@@ -152,6 +159,8 @@ def analizar():
         resultado = {
             "id": patient_id,
             "gender": gender,
+            "age": age,
+            "weight": weight,
             "totalRecords": total_records,
             "totalTime": total_time,
             "score": score,
