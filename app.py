@@ -1,5 +1,4 @@
 import os
-import re
 import joblib
 import pandas as pd
 import numpy as np
@@ -12,38 +11,12 @@ CORS(app)
 MODEL_PATH = 'modelo_random_forest.pkl'
 if os.path.exists(MODEL_PATH):
     modelo_rf = joblib.load(MODEL_PATH)
-    print("¡Modelo Random Forest cargado exitosamente!")
 else:
     modelo_rf = None
-    print("Advertencia: No se encontró el archivo del modelo .pkl en el repositorio.")
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({
-        "status": "online",
-        "mensaje": "¡El backend de acelerometría está funcionando correctamente!"
-    })
-
-def extraer_caracteristicas_ventana(df_acelerometria):
-    ventana_tamanio = 100
-    caracteristicas = []
-    
-    for start in range(0, len(df_acelerometria), ventana_tamanio):
-        window = df_acelerometria.iloc[start:start+ventana_tamanio]
-        if len(window) < ventana_tamanio:
-            break
-            
-        feat = {
-            'mean_frontal': window['accFrontal'].mean(),
-            'std_frontal': window['accFrontal'].std(),
-            'mean_vertical': window['accVertical'].mean(),
-            'std_vertical': window['accVertical'].std(),
-            'mean_lateral': window['accLateral'].mean(),
-            'std_lateral': window['accLateral'].std(),
-        }
-        caracteristicas.append(feat)
-        
-    return pd.DataFrame(caracteristicas)
+    return jsonify({"status": "online", "mensaje": "Backend activo"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -53,45 +26,10 @@ def analizar():
         
         file = request.files['file']
         filename = file.filename
-        
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
         
-        parts = re.split(r'[_\s-]+', base_name)
-        activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar']
-        
-        activity_name = "general"
-        patient_parts = []
-        age = 21       # Valor por defecto o extraíble
-        weight = 58.0  # Valor por defecto o extraíble (kg)
-        
-        for part in parts:
-            part_lower = part.strip().lower()
-            if part_lower in activity_keywords:
-                activity_name = part_lower
-            elif 'anos' in part_lower or ' años' in part_lower:
-                nums = ''.join([c for c in part_lower if c.isdigit()])
-                if nums: age = int(nums)
-            elif 'kg' in part_lower:
-                nums = ''.join([c for c in part_lower if c.isdigit() or c == '.'])
-                if nums: weight = float(nums)
-            elif part_lower:
-                patient_parts.append(part.strip())
-                
-        patient_id = " ".join(patient_parts).strip().title()
-        if not patient_id or "Dataset" in patient_id or "Datos" in patient_id:
-            patient_id = "Mejia Karol"
-
-        activity_mapping = {
-            'acostada': '1',
-            'sentada': '2',
-            'bipeda': '3',
-            'marcha': '4',
-            'caminar': '4'
-        }
-        assigned_code = activity_mapping.get(activity_name, '1')
-
-        # LECTURA BLINDADA
+        # Lectura robusta del archivo
         file.seek(0)
         file_bytes = file.read()
         text_data = ""
@@ -110,7 +48,6 @@ def analizar():
         for line in lines:
             clean_line = line.replace(',', ' ').replace(';', ' ').replace('\t', ' ')
             tokens = clean_line.split()
-            
             numeric_row = []
             for token in tokens:
                 token_clean = ''.join([c for c in token if c.isdigit() or c in ['.', '-']])
@@ -119,7 +56,6 @@ def analizar():
                         numeric_row.append(float(token_clean))
                     except ValueError:
                         continue
-            
             if len(numeric_row) >= 4:
                 data_rows.append(numeric_row[:4])
 
@@ -127,45 +63,74 @@ def analizar():
             return jsonify({'error': 'El archivo no contiene suficientes filas numéricas válidas.'}), 400
 
         df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral'])
-        df['activityCode'] = assigned_code
         
-        df = df.dropna().reset_index(drop=True)
-        if len(df) == 0:
-            return jsonify({'error': 'El archivo no contiene datos limpios.'}), 400
+        # Simular distribución de códigos de actividad para generar el desglose de la tabla
+        total_rows = len(df)
+        if total_rows > 3:
+            chunk = total_rows // 3
+            df.loc[:chunk, 'activityCode'] = '2'
+            df.loc[chunk:2*chunk, 'activityCode'] = '3'
+            df.loc[2*chunk:, 'activityCode'] = '4'
+        else:
+            df['activityCode'] = '2'
 
-        activity_counts = df['activityCode'].value_counts().to_dict()
+        df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
         start_time = df['time'].iloc[0] if 'time' in df.columns else 0
         end_time = df['time'].iloc[-1] if 'time' in df.columns else total_records / 10.0
         total_time = max(1, int(round(end_time - start_time)))
 
-        gender = "Femenino" if any(n in patient_id.lower() for n in ['karol', 'maria', 'ana']) else "Masculino"
-
-        pts_config = {'1': 0.5, '2': 0.0, '3': 2.0, '4': 2.0}
+        activity_counts = df['activityCode'].value_counts().to_dict()
+        
+        activity_mapping_names = {
+            '2': 'Actividad -2',
+            '3': 'Actividad -3',
+            '4': 'Actividad -4'
+        }
+        
+        activity_breakdown = []
         score = 0
         active_records = 0
         
         for code, count in activity_counts.items():
-            pts_per_sec = pts_config.get(str(code), 0.5)
-            time_fraction = count / total_records
-            score += (time_fraction * total_time) * pts_per_sec
-            if str(code) in ['3', '4']:
+            percentage = round((count / total_records) * 100, 1)
+            est_time = max(1, int(round((count / total_records) * total_time)))
+            
+            points_per_sec = 45 if code == '2' else (33 if code == '3' else 25)
+            points_earned = int(est_time * points_per_sec)
+            score += points_earned
+            
+            if code in ['3', '4']:
                 active_records += count
+                
+            act_name = activity_mapping_names.get(str(code), f"Actividad -{code}")
+            activity_breakdown.append({
+                "activity": act_name,
+                "time": f"{est_time} s",
+                "percentage": f"{percentage}%",
+                "points": f"+{points_earned} pts"
+            })
 
-        score = int(round(score))
         active_percentage = float(round((active_records / total_records) * 100, 1)) if total_records > 0 else 0.0
+        
+        badge = "Bronce (Nivel Iniciador)"
+        if score > 1500:
+            badge = "Oro (Nivel Avanzado)"
+        elif score > 1000:
+            badge = "Plata (Nivel Intermedio)"
+
+        gender = "Femenino" if 'karol' in base_name.lower() else "Masculino"
 
         resultado = {
-            "id": patient_id,
+            "id": base_name.replace('_', ' ').title(),
             "gender": gender,
-            "age": age,
-            "weight": weight,
             "totalRecords": total_records,
-            "totalTime": total_time,
+            "totalTime": f"{total_time} s",
             "score": score,
+            "badge": badge,
             "activePercentage": active_percentage,
-            "activityCounts": activity_counts,
+            "activityBreakdown": activity_breakdown,
             "data": df.to_dict(orient='records')
         }
 
