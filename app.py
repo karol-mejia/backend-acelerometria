@@ -10,7 +10,7 @@ CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend activo con Porcentaje Activo Ponderado"})
+    return jsonify({"status": "online", "mensaje": "Backend activo con parser Regex para .txtux"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -21,21 +21,33 @@ def analizar():
         file_key = list(request.files.keys())[0]
         file = request.files[file_key]
         
-        filename = file.filename if file.filename else "archivo.csv"
+        filename = file.filename if file.filename else "archivo.txt"
         clean_filename = filename.split('/')[-1].split('\\')[-1]
-        base_name = os.path.splitext(clean_filename)[0]
         
-        # Extraer género del último carácter del nombre (ej. d1p33F -> Femenino)
-        gender_char = base_name[-1].upper() if len(base_name) > 0 else 'F'
+        base_name = clean_filename
+        for ext in ['.txtux', '.txt', '.csv', '.dat', '.zip']:
+            if base_name.lower().endswith(ext):
+                base_name = base_name[:-len(ext)]
+        
+        # Extraer género del último carácter (ej. F o M)
+        gender_char = base_name[-1].upper() if len(base_name) > 0 and base_name[-1].upper() in ['F', 'M'] else 'F'
         gender = "Femenino" if gender_char == 'F' else "Masculino"
         
-        # Limpiar ID del paciente removiendo el carácter de género final
-        patient_id_raw = base_name[:-1] if gender_char in ['F', 'M'] and len(base_name) > 1 and base_name[-2] in ['_', '-', ' '] else base_name
-        patient_id = patient_id_raw.replace('_', ' ').replace('-', ' ').strip().upper()
-        if not patient_id:
-            patient_id = "PACIENTE 01"
+        # Limpiar nombre del paciente agrupando todos los archivos bajo "Mejia Karol" o el nombre real
+        activity_keywords = ['sentada', 'bipeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar', 'cama', 'silla', 'deambulando']
+        patient_raw = base_name[:-1] if len(base_name) > 1 and base_name[-1].upper() in ['F', 'M'] else base_name
+        
+        clean_words = []
+        for word in re.split(r'[_\s-]+', patient_raw):
+            w_low = word.strip().lower()
+            if w_low not in activity_keywords and not w_low.isdigit() and w_low not in ['f', 'm']:
+                clean_words.append(word.strip())
+                
+        patient_id = " ".join(clean_words).strip().title()
+        if not patient_id or len(patient_id) < 3:
+            patient_id = "Mejia Karol"
 
-        # Lectura robusta del archivo
+        # Lectura robusta de bytes y decodificación
         file.seek(0)
         file_bytes = file.read()
         text_data = ""
@@ -53,36 +65,45 @@ def analizar():
         data_rows = []
         
         for line in lines:
-            if not line.strip():
+            line_str = line.strip()
+            if not line_str:
                 continue
             
-            if ',' in line:
-                tokens = [t.strip() for t in line.split(',')]
-            elif ';' in line:
-                tokens = [t.strip() for t in line.split(';')]
-            else:
-                tokens = line.split()
-            
             try:
-                # Columnas: 1(Tiempo), 2(Frontal), 3(Vertical), 4(Lateral), 9(Actividad)
-                if len(tokens) >= 9:
-                    t_val = float(tokens[0])
-                    f_val = float(tokens[1])
-                    v_val = float(tokens[2])
-                    l_val = float(tokens[3])
-                    act_val = int(float(tokens[8]))
+                # Extraer TODOS los números válidos de la línea usando Regex (ignora símbolos y basura)
+                numbers = re.findall(r'[-+]?\d*\.\d+|[-+]?\d+', line_str)
+                
+                if len(numbers) >= 9:
+                    t_val = float(numbers[0])
+                    f_val = float(numbers[1])
+                    v_val = float(numbers[2])
+                    l_val = float(numbers[3])
+                    act_val = int(float(numbers[8])) # Columna 9 (índice 8)
                     data_rows.append([t_val, f_val, v_val, l_val, act_val])
-            except ValueError:
+                elif len(numbers) >= 4:
+                    t_val = float(numbers[0])
+                    f_val = float(numbers[1])
+                    v_val = float(numbers[2])
+                    l_val = float(numbers[3])
+                    # Detección de actividad por el nombre del archivo si falta la columna 9
+                    default_act = 1
+                    b_lower = base_name.lower()
+                    if 'bipeda' in b_lower: default_act = 3
+                    elif 'marcha' in b_lower or 'caminar' in b_lower: default_act = 4
+                    elif 'acostada' in b_lower: default_act = 3
+                    elif 'sentada' in b_lower: default_act = 2
+                    data_rows.append([t_val, f_val, v_val, l_val, default_act])
+            except Exception:
                 continue
 
         if len(data_rows) == 0:
-            return jsonify({'error': 'El archivo no contiene filas numéricas válidas con el formato de 9 columnas.'}), 400
+            return jsonify({'error': f'El archivo {filename} no contiene filas numéricas procesables.'}), 400
 
         df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral', 'activityCode'])
         df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
-        # Normalización y cálculo del tiempo en segundos
+        # Normalización de tiempo en segundos desde 0
         t_min = df['time'].min()
         t_max = df['time'].max()
         raw_duration = t_max - t_min
@@ -108,12 +129,11 @@ def analizar():
             4: 'Deambulando'
         }
 
-        # Factores de intensidad actualizados para que todas las actividades sumen
         intensity_weights = {
-            1: 0.3,  # Sentado en la cama
-            2: 0.5,  # Sentado en una silla
-            3: 0.1,  # Acostado (ahora aporta un valor base mayor a 0)
-            4: 1.0   # Deambulando
+            1: 0.3,
+            2: 0.5,
+            3: 0.1,
+            4: 1.0
         }
 
         activity_breakdown = []
@@ -121,10 +141,10 @@ def analizar():
         weighted_activity_sum = 0
 
         pts_config = {
-            1: 0.5,
-            2: 0.5,
-            3: 0.1,
-            4: 3.0
+            1: 5,
+            2: 5,
+            3: 2,
+            4: 30
         }
 
         for code, count in sorted(activity_counts.items()):
@@ -133,11 +153,10 @@ def analizar():
             est_time = max(1, int(round((count / total_records) * total_time)))
             
             pts_per_sec = pts_config.get(code_int, 1.0)
-            points_earned = int(est_time * pts_per_sec * 10)
+            points_earned = int(est_time * (pts_per_sec / 10.0) * 10)
             total_score += points_earned
             
-            # Acumular peso de intensidad para el porcentaje activo global
-            weight = intensity_weights.get(code_int, 0.0)
+            weight = intensity_weights.get(code_int, 0.1)
             weighted_activity_sum += count * weight
 
             act_label = activity_names_map.get(code_int, f"Actividad {code_int}")
@@ -148,7 +167,6 @@ def analizar():
                 "points": f"+{points_earned} pts"
             })
 
-        # Porcentaje activo basado en la ponderación acumulada de intensidad
         active_percentage = float(round((weighted_activity_sum / total_records) * 100, 1))
         badge = "Oro (Nivel Avanzado)" if total_score > 1500 else ("Plata (Nivel Intermedio)" if total_score > 800 else "Bronce (Nivel Iniciador)")
 
