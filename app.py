@@ -9,29 +9,96 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-def decodificar_texto(file_bytes):
-    """Decodifica bytes priorizando UTF-16 para archivos .txtux de sensores."""
+def leer_archivo_universal(file_bytes, filename):
+    """
+    Lee de forma inteligente archivos Excel (.xlsx, .xls), CSV, TXT o TXTUX,
+    detectando automáticamente la codificación, separadores y filas de encabezado.
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    
+    # 1. Soporte para archivos Excel
+    if ext in ['.xlsx', '.xls']:
+        try:
+            # Leer todas las hojas o la primera hoja disponible
+            excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
+            sheet_name = excel_file.sheet_names[0]
+            df_raw = pd.read_excel(excel_file, sheet_name=sheet_name)
+            return df_raw, "Excel (.xlsx/.xls)"
+        except Exception as e:
+            raise ValueError(f"No se pudo leer el archivo Excel: {str(e)}")
+
+    # 2. Soporte para archivos de texto / planos (.txt, .csv, .txtux)
+    text_data = None
+    encoding_usado = None
     encodings = ['utf-16', 'utf-16le', 'utf-16be', 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+    
     for enc in encodings:
         try:
-            text = file_bytes.decode(enc)
-            if text and len(text.strip()) > 0:
-                # Si decodificó correctamente en UTF-16 o UTF-8 sin errores masivos de basura
+            decoded = file_bytes.decode(enc)
+            if decoded and len(decoded.strip()) > 0:
                 if enc in ['utf-16', 'utf-16le', 'utf-16be', 'utf-8']:
-                    return text, enc
-                # Para latin-1 o cp1252, verificar que no tenga exceso de caracteres nulos sueltos
-                if text.count('\x00') < (len(text) * 0.05):
-                    return text, enc
+                    text_data = decoded
+                    encoding_usado = enc
+                    break
+                if decoded.count('\x00') < (len(decoded) * 0.05):
+                    text_data = decoded
+                    encoding_usado = enc
+                    break
         except Exception:
             continue
-    
-    # Respaldo forzado a UTF-16 o latin-1 ignorando errores
-    try:
-        return file_bytes.decode('utf-16', errors='ignore'), 'utf-16'
-    except:
-        return file_bytes.decode('latin-1', errors='ignore'), 'latin-1'
 
-def mapear_columnas_inteligente(df_raw, filename):
+    if not text_data:
+        try:
+            text_data = file_bytes.decode('utf-16', errors='ignore')
+            encoding_usado = 'utf-16 (forzado)'
+        except Exception:
+            text_data = file_bytes.decode('latin-1', errors='ignore')
+            encoding_usado = 'latin-1 (forzado)'
+
+    lines = [line.strip() for line in text_data.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("El archivo está completamente vacío.")
+
+    # Auto-descubrimiento de la fila de encabezado real (ignorando metadatos superiores)
+    header_idx = 0
+    for idx, line in enumerate(lines[:15]):
+        l_low = line.lower()
+        if any(kw in l_low for kw in ['time', 'tiempo', 't(s)', 'acc', 'gyro', 'x', 'y', 'z', 'roll', 'pitch']):
+            header_idx = idx
+            break
+        # Si la línea tiene múltiples números o separadores, asumimos que ahí empiezan los datos
+        if len(re.findall(r'[,;\t\s]+', line)) >= 2:
+            header_idx = max(0, idx - 1)
+            break
+
+    # Intentar leer tabularmente con pandas detectando el separador automáticamente
+    try:
+        csv_buffer = io.StringIO("\n".join(lines[header_idx:]))
+        df_raw = pd.read_csv(csv_buffer, sep=None, engine='python', on_bad_lines='skip')
+        if df_raw.empty or len(df_raw.columns) <= 1:
+            raise ValueError("Estructura tabular muy angosta.")
+        return df_raw, f"Texto estructurado ({encoding_usado})"
+    except Exception:
+        # Respaldo: extracción directa por filas y expresiones regulares
+        data_matrix = []
+        for line in lines[header_idx:]:
+            if any(w in line.lower() for w in ['time', 't(s)', 'acc.', 'gyro.', 'roll', 'pitch', 'yaw']):
+                continue
+            nums = re.findall(r'[-+]?\d*\.?\d+', line.replace(',', '.'))
+            if len(nums) >= 2:
+                data_matrix.append([float(n) for n in nums])
+        
+        if not data_matrix:
+            raise ValueError("No se encontraron filas numéricas procesables en el archivo.")
+        
+        df_raw = pd.DataFrame(data_matrix)
+        return df_raw, f"Texto plano parseado por Regex ({encoding_usado})"
+
+def mapear_columnas_universal(df_raw, filename):
+    """
+    Identifica dinámicamente las columnas de Tiempo, Aceleración (X, Y, Z) 
+    y Actividad sin importar el nombre o el orden en el archivo.
+    """
     columnas = [str(col).strip() for col in df_raw.columns]
     num_cols = len(columnas)
     
@@ -43,6 +110,7 @@ def mapear_columnas_inteligente(df_raw, filename):
     patterns_z = r'^(acc_?z|z|lateral|acclateral|z\(m/s\^2\)|az)$'
     patterns_act = r'^(activity|actividad|label|code|codigo|estado|postura)$'
 
+    # 1. Búsqueda por nombres coincidentes en encabezados
     for idx, col in enumerate(columnas):
         c_low = col.lower().strip()
         if not col_map['time'] and re.search(patterns_time, c_low): col_map['time'] = idx
@@ -51,10 +119,11 @@ def mapear_columnas_inteligente(df_raw, filename):
         elif not col_map['accLateral'] and re.search(patterns_z, c_low): col_map['accLateral'] = idx
         elif not col_map['activity'] and re.search(patterns_act, c_low): col_map['activity'] = idx
 
+    # 2. Búsqueda por perfil numérico si faltan columnas clave
     numeric_cols = []
     for idx in range(num_cols):
         series = pd.to_numeric(df_raw.iloc[:, idx].astype(str).str.replace(',', '.'), errors='coerce')
-        if series.notnull().sum() > (len(df_raw) * 0.3):
+        if series.notnull().sum() > (len(df_raw) * 0.2):
             numeric_cols.append(idx)
 
     if col_map['time'] is None and len(numeric_cols) >= 1:
@@ -65,53 +134,22 @@ def mapear_columnas_inteligente(df_raw, filename):
     if col_map['accVertical'] is None and len(remaining_num) >= 2: col_map['accVertical'] = remaining_num[1]
     if col_map['accLateral'] is None and len(remaining_num) >= 3: col_map['accLateral'] = remaining_num[2]
 
+    # Detectar actividad por número de columnas (ej. columna 9 / índice 8) o valores discretos
+    if col_map['activity'] is None:
+        if num_cols >= 9:
+            col_map['activity'] = 8
+        else:
+            for c in remaining_num[3:]:
+                series = pd.to_numeric(df_raw.iloc[:, c].astype(str).str.replace(',', '.'), errors='coerce')
+                unique_vals = series.dropna().unique()
+                if len(unique_vals) <= 10 and all(float(v).is_integer() for v in unique_vals if pd.notnull(v)):
+                    col_map['activity'] = c
+                    break
+
     return col_map, columnas
 
-def parse_sensor_dataframe(text_data, filename):
-    lines = [line.strip() for line in text_data.splitlines() if line.strip()]
-    if not lines:
-        raise ValueError("El archivo está completamente vacío.")
-
-    sample_block = "\n".join(lines[:20])
-    comma_count = sample_block.count(',')
-    semicolon_count = sample_block.count(';')
-    tab_count = sample_block.count('\t')
-
-    if tab_count > comma_count and tab_count > semicolon_count:
-        sep = r'\t+'
-    elif semicolon_count > comma_count:
-        sep = ';'
-    elif comma_count > 0:
-        sep = ','
-    else:
-        sep = r'\s+'
-
-    try:
-        df_raw = pd.read_csv(io.StringIO(text_data), sep=sep, engine='python', on_bad_lines='skip')
-    except Exception:
-        data_matrix = []
-        for l in lines:
-            normalized = l.replace(',', '.')
-            nums = re.findall(r'[-+]?\d*\.?\d+', normalized)
-            if nums:
-                data_matrix.append(nums)
-        df_raw = pd.DataFrame(data_matrix)
-
-    if df_raw.empty or len(df_raw.columns) == 0:
-        # Respaldo por filas crudas con Regex si pandas falla en la estructura
-        data_matrix = []
-        for l in lines:
-            if any(w in l.lower() for w in ['time', 't(s)', 'acc', 'gyro', 'roll', 'pitch', 'yaw']):
-                continue
-            nums = re.findall(r'[-+]?\d*\.?\d+', l.replace(',', '.'))
-            if len(nums) >= 2:
-                data_matrix.append(nums)
-        df_raw = pd.DataFrame(data_matrix)
-
-    if df_raw.empty:
-        raise ValueError("No se pudieron extraer filas numéricas procesables.")
-
-    col_map, col_names = mapear_columnas_inteligente(df_raw, filename)
+def procesar_dataframe_sensor(df_raw, filename):
+    col_map, col_names = mapear_columnas_universal(df_raw, filename)
 
     if col_map['time'] is None:
         col_map['time'] = 0
@@ -132,6 +170,7 @@ def parse_sensor_dataframe(text_data, filename):
     else:
         df_clean['accLateral'] = df_clean['accFrontal']
 
+    # Detección de actividad por nombre de archivo si no viene en columna
     b_lower = filename.lower()
     default_act = 1
     if 'acostada' in b_lower: default_act = 3
@@ -148,19 +187,20 @@ def parse_sensor_dataframe(text_data, filename):
     df_clean = df_clean.dropna(subset=['time', 'accFrontal']).reset_index(drop=True)
 
     if df_clean.empty:
-        raise ValueError("El archivo contiene datos pero las columnas numéricas no arrojaron valores válidos.")
+        raise ValueError("El archivo no contiene filas con registros numéricos válidos tras el procesamiento.")
 
     meta_info = {
+        'total_filas_originales': len(df_raw),
         'total_filas_validas': len(df_clean),
         'columnas_detectadas': col_names,
-        'separador_utilizado': str(sep)
+        'mapeo_indices': col_map
     }
 
     return df_clean, meta_info
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend activo y optimizado para UTF-16"})
+    return jsonify({"status": "online", "mensaje": "Backend Universal de Ingesta Activo"})
 
 @app.route('/inspeccionar', methods=['POST'])
 def inspeccionar():
@@ -173,15 +213,14 @@ def inspeccionar():
 
         file.seek(0)
         file_bytes = file.read()
-        text_data, encoding_used = decodificar_texto(file_bytes)
+        
+        df_raw, tipo_lectura = leer_archivo_universal(file_bytes, filename)
+        df_clean, meta = procesar_dataframe_sensor(df_raw, filename)
+        meta['tipo_lectura'] = tipo_lectura
 
-        if not text_data:
-            return jsonify({'error': f'No se pudo decodificar el archivo {filename}.'}), 400
-
-        df_clean, meta = parse_sensor_dataframe(text_data, filename)
         preview_rows = df_clean.head(5).to_dict(orient='records')
 
-        return jsonify({'status': 'success', 'filename': filename, 'encoding': encoding_used, 'meta': meta, 'preview': preview_rows})
+        return jsonify({'status': 'success', 'filename': filename, 'meta': meta, 'preview': preview_rows})
     except Exception as e:
         return jsonify({'error': str(e)}), 422
 
@@ -200,12 +239,10 @@ def analizar():
 
         file.seek(0)
         file_bytes = file.read()
-        text_data, _ = decodificar_texto(file_bytes)
 
-        if not text_data:
-            return jsonify({'error': f'No se pudo decodificar el archivo {filename}.'}), 400
-
-        df, meta = parse_sensor_dataframe(text_data, filename)
+        df_raw, tipo_lectura = leer_archivo_universal(file_bytes, filename)
+        df, meta = procesar_dataframe_sensor(df_raw, filename)
+        meta['tipo_lectura'] = tipo_lectura
         total_records = len(df)
 
         gender_char = base_name[-1].upper() if len(base_name) > 0 and base_name[-1].upper() in ['F', 'M'] else 'F'
