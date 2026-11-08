@@ -10,7 +10,7 @@ CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend activo con parser flexible de columnas"})
+    return jsonify({"status": "online", "mensaje": "Backend multi-paciente activo y flexible"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -25,28 +25,57 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         b_lower = clean_filename.lower()
         
-        # Determinar la actividad basándonos en el nombre del archivo
+        # 1. Determinar la actividad según el nombre del archivo
         if 'acostada' in b_lower:
             activity_code = 3
             act_name = 'Acostado'
         elif 'sentada' in b_lower:
-            activity_code = 2
-            act_name = 'Sentado en una silla'
+            if 'cama' in b_lower:
+                activity_code = 1
+                act_name = 'Sentado en la cama'
+            else:
+                activity_code = 2
+                act_name = 'Sentado en una silla'
         elif 'bipeda' in b_lower or 'bípeda' in b_lower:
-            activity_code = 3
-            act_name = 'Bípeda (Estática)'
-        elif 'marcha' in b_lower or 'caminar' in b_lower:
+            activity_code = 2
+            act_name = 'Bípeda / Estática'
+        elif 'marcha' in b_lower or 'caminar' in b_lower or 'deambulando' in b_lower:
             activity_code = 4
             act_name = 'Deambulando'
         else:
             activity_code = 1
-            act_name = 'Sentado en la cama'
+            act_name = 'Actividad General'
 
-        gender_char = clean_filename[-1].upper() if len(clean_filename) > 0 and clean_filename[-1].upper() in ['F', 'M'] else 'F'
+        # 2. Extraer nombre del paciente y género dinámicamente del nombre del archivo
+        base_name = clean_filename
+        for ext in ['.txtux', '.txt', '.csv', '.dat', '.zip']:
+            if base_name.lower().endswith(ext):
+                base_name = base_name[:-len(ext)]
+        
+        gender_char = 'F'
+        if len(base_name) > 0 and base_name[-1].upper() in ['F', 'M']:
+            gender_char = base_name[-1].upper()
+            base_name = base_name[:-1].strip()
         gender = "Femenino" if gender_char == 'F' else "Masculino"
-        patient_id = "Mejia Karol"
+        
+        # Limpiar palabras clave de actividad para dejar solo el nombre del paciente
+        activity_keywords = ['sentada', 'bipeda', 'bípeda', 'marcha', 'acostada', 'caminar', 'correr', 'trotar', 'cama', 'silla', 'deambulando', 'estatica', 'estática', 'datos']
+        words = re.split(r'[_\s-]+', base_name)
+        clean_words = []
+        for w in words:
+            w_low = w.strip().lower()
+            if w_low not in activity_keywords and not w_low.isdigit() and len(w_low) > 0:
+                clean_words.append(w.strip())
+        
+        patient_id = " ".join(clean_words).strip().title()
+        if not patient_id or len(patient_id) < 2:
+            match_p = re.search(r'(p\d+|d\d+p\d+)', base_name.lower())
+            if match_p:
+                patient_id = f"Paciente {match_p.group(1).upper()}"
+            else:
+                patient_id = "Participante 01"
 
-        # Lectura robusta con soporte UTF-16 para archivos .txtux
+        # 3. Lectura robusta con soporte prioritario UTF-16 para .txtux
         file.seek(0)
         file_bytes = file.read()
         text_data = ""
@@ -70,16 +99,14 @@ def analizar():
                 continue
             
             line_lower = line_str.lower()
-            # Omitir filas de cabecera con texto
             if any(word in line_lower for word in ['time', 't(s)', 'acc', 'gyro', 'roll', 'pitch', 'yaw']):
                 continue
             
             try:
-                # Normalizar comas decimales a puntos y extraer todos los números de la línea
                 normalized_line = line_str.replace(',', '.')
                 numbers = re.findall(r'[-+]?\d*\.?\d+', normalized_line)
                 
-                # FLEXIBLE: Con que tenga al menos 2 números (Tiempo y al menos un eje de aceleración)
+                # Flexible: Toma tiempo (col 0) y ejes de aceleración
                 if len(numbers) >= 2:
                     t_val = float(numbers[0])
                     ax = float(numbers[1])
@@ -97,7 +124,6 @@ def analizar():
         df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
-        # Normalización del tiempo en segundos
         t_min = df['time'].min()
         t_max = df['time'].max()
         raw_duration = t_max - t_min
