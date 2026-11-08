@@ -10,99 +10,68 @@ app = Flask(__name__)
 CORS(app)
 
 def decodificar_texto(file_bytes):
-    """Prueba múltiples codificaciones para decodificar bytes sin corromper el contenido."""
+    """Decodifica bytes priorizando UTF-16 para archivos .txtux de sensores."""
     encodings = ['utf-16', 'utf-16le', 'utf-16be', 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
     for enc in encodings:
         try:
             text = file_bytes.decode(enc)
-            # Verificar si no contiene demasiados caracteres nulos de decodificación fallida
-            if len(text.strip()) > 0 and text.count('\x00') < (len(text) * 0.1):
-                return text, enc
-        except (UnicodeDecodeError, Exception):
+            if text and len(text.strip()) > 0:
+                # Si decodificó correctamente en UTF-16 o UTF-8 sin errores masivos de basura
+                if enc in ['utf-16', 'utf-16le', 'utf-16be', 'utf-8']:
+                    return text, enc
+                # Para latin-1 o cp1252, verificar que no tenga exceso de caracteres nulos sueltos
+                if text.count('\x00') < (len(text) * 0.05):
+                    return text, enc
+        except Exception:
             continue
-    return None, None
+    
+    # Respaldo forzado a UTF-16 o latin-1 ignorando errores
+    try:
+        return file_bytes.decode('utf-16', errors='ignore'), 'utf-16'
+    except:
+        return file_bytes.decode('latin-1', errors='ignore'), 'latin-1'
 
 def mapear_columnas_inteligente(df_raw, filename):
-    """
-    Analiza un DataFrame sin estructura fija e identifica automáticamente:
-    - Columna de Tiempo
-    - Ejes de Aceleración (Frontal/X, Vertical/Y, Lateral/Z)
-    - Columna o Estado de Actividad
-    """
     columnas = [str(col).strip() for col in df_raw.columns]
     num_cols = len(columnas)
     
-    col_map = {
-        'time': None,
-        'accFrontal': None,
-        'accVertical': None,
-        'accLateral': None,
-        'activity': None
-    }
+    col_map = {'time': None, 'accFrontal': None, 'accVertical': None, 'accLateral': None, 'activity': None}
 
-    # Patterns Regex para detectar nombres habituales
     patterns_time = r'^(time|tiempo|t|t\(s\)|timestamp|sec|segundos)$'
-    patterns_x = r'^(acc_?x|x| frontal|accfrontal|x\(m/s\^2\)|ax)$'
+    patterns_x = r'^(acc_?x|x|frontal|accfrontal|x\(m/s\^2\)|ax)$'
     patterns_y = r'^(acc_?y|y|vertical|accvertical|y\(m/s\^2\)|ay)$'
     patterns_z = r'^(acc_?z|z|lateral|acclateral|z\(m/s\^2\)|az)$'
     patterns_act = r'^(activity|actividad|label|code|codigo|estado|postura)$'
 
-    # 1. Búsqueda por encabezados
     for idx, col in enumerate(columnas):
         c_low = col.lower().strip()
-        if not col_map['time'] and re.search(patterns_time, c_low):
-            col_map['time'] = idx
-        elif not col_map['accFrontal'] and re.search(patterns_x, c_low):
-            col_map['accFrontal'] = idx
-        elif not col_map['accVertical'] and re.search(patterns_y, c_low):
-            col_map['accVertical'] = idx
-        elif not col_map['accLateral'] and re.search(patterns_z, c_low):
-            col_map['accLateral'] = idx
-        elif not col_map['activity'] and re.search(patterns_act, c_low):
-            col_map['activity'] = idx
+        if not col_map['time'] and re.search(patterns_time, c_low): col_map['time'] = idx
+        elif not col_map['accFrontal'] and re.search(patterns_x, c_low): col_map['accFrontal'] = idx
+        elif not col_map['accVertical'] and re.search(patterns_y, c_low): col_map['accVertical'] = idx
+        elif not col_map['accLateral'] and re.search(patterns_z, c_low): col_map['accLateral'] = idx
+        elif not col_map['activity'] and re.search(patterns_act, c_low): col_map['activity'] = idx
 
-    # 2. Asignación por posición/orden si no se detectó por nombre
     numeric_cols = []
     for idx in range(num_cols):
-        # Convertir a numérico para evaluar el tipo de variable
         series = pd.to_numeric(df_raw.iloc[:, idx].astype(str).str.replace(',', '.'), errors='coerce')
-        if series.notnull().sum() > (len(df_raw) * 0.5):
+        if series.notnull().sum() > (len(df_raw) * 0.3):
             numeric_cols.append(idx)
 
     if col_map['time'] is None and len(numeric_cols) >= 1:
         col_map['time'] = numeric_cols[0]
 
-    # Asignar ejes secuencialmente a las siguientes columnas numéricas
     remaining_num = [c for c in numeric_cols if c != col_map['time']]
-    
-    if col_map['accFrontal'] is None and len(remaining_num) >= 1:
-        col_map['accFrontal'] = remaining_num[0]
-    if col_map['accVertical'] is None and len(remaining_num) >= 2:
-        col_map['accVertical'] = remaining_num[1]
-    if col_map['accLateral'] is None and len(remaining_num) >= 3:
-        col_map['accLateral'] = remaining_num[2]
-
-    # Detectar actividad si hay una 9na columna o por descarte de columna entera/categorica
-    if col_map['activity'] is None:
-        if num_cols >= 9:
-            col_map['activity'] = 8 # Columna 9 (índice 8)
-        else:
-            for c in remaining_num[3:]:
-                series = pd.to_numeric(df_raw.iloc[:, c].astype(str).str.replace(',', '.'), errors='coerce')
-                unique_vals = series.dropna().unique()
-                if len(unique_vals) <= 10 and all(v.is_integer() for v in unique_vals if pd.notnull(v)):
-                    col_map['activity'] = c
-                    break
+    if col_map['accFrontal'] is None and len(remaining_num) >= 1: col_map['accFrontal'] = remaining_num[0]
+    if col_map['accVertical'] is None and len(remaining_num) >= 2: col_map['accVertical'] = remaining_num[1]
+    if col_map['accLateral'] is None and len(remaining_num) >= 3: col_map['accLateral'] = remaining_num[2]
 
     return col_map, columnas
 
 def parse_sensor_dataframe(text_data, filename):
-    """Parsea el texto en un DataFrame estructurado identificando separadores y encabezados."""
     lines = [line.strip() for line in text_data.splitlines() if line.strip()]
     if not lines:
         raise ValueError("El archivo está completamente vacío.")
 
-    # Detectar el separador probabilísticamente
     sample_block = "\n".join(lines[:20])
     comma_count = sample_block.count(',')
     semicolon_count = sample_block.count(';')
@@ -117,11 +86,9 @@ def parse_sensor_dataframe(text_data, filename):
     else:
         sep = r'\s+'
 
-    # Intentar leer con pandas
     try:
         df_raw = pd.read_csv(io.StringIO(text_data), sep=sep, engine='python', on_bad_lines='skip')
     except Exception:
-        # Respaldo con regex fila por fila
         data_matrix = []
         for l in lines:
             normalized = l.replace(',', '.')
@@ -130,38 +97,41 @@ def parse_sensor_dataframe(text_data, filename):
                 data_matrix.append(nums)
         df_raw = pd.DataFrame(data_matrix)
 
-    if df_raw.empty:
-        raise ValueError("No se pudieron extraer datos o filas estructuradas del archivo.")
+    if df_raw.empty or len(df_raw.columns) == 0:
+        # Respaldo por filas crudas con Regex si pandas falla en la estructura
+        data_matrix = []
+        for l in lines:
+            if any(w in l.lower() for w in ['time', 't(s)', 'acc', 'gyro', 'roll', 'pitch', 'yaw']):
+                continue
+            nums = re.findall(r'[-+]?\d*\.?\d+', l.replace(',', '.'))
+            if len(nums) >= 2:
+                data_matrix.append(nums)
+        df_raw = pd.DataFrame(data_matrix)
 
-    # Mapear columnas
+    if df_raw.empty:
+        raise ValueError("No se pudieron extraer filas numéricas procesables.")
+
     col_map, col_names = mapear_columnas_inteligente(df_raw, filename)
 
-    # Validaciones fundamentales
-    missing_elements = []
     if col_map['time'] is None:
-        missing_elements.append("Columna de Tiempo (sec/timestamp)")
+        col_map['time'] = 0
     if col_map['accFrontal'] is None:
-        missing_elements.append("Eje de Aceleración Principal (Frontal/X)")
+        col_map['accFrontal'] = 1 if len(df_raw.columns) > 1 else 0
 
-    if missing_elements:
-        raise ValueError(f"Estructura no reconocida o incompleta. No se detectó: {', '.join(missing_elements)}.")
-
-    # Extraer y limpiar DataFrame normalizado
     df_clean = pd.DataFrame()
     df_clean['time'] = pd.to_numeric(df_raw.iloc[:, col_map['time']].astype(str).str.replace(',', '.'), errors='coerce')
     df_clean['accFrontal'] = pd.to_numeric(df_raw.iloc[:, col_map['accFrontal']].astype(str).str.replace(',', '.'), errors='coerce')
     
-    if col_map['accVertical'] is not None:
+    if col_map['accVertical'] is not None and col_map['accVertical'] < len(df_raw.columns):
         df_clean['accVertical'] = pd.to_numeric(df_raw.iloc[:, col_map['accVertical']].astype(str).str.replace(',', '.'), errors='coerce')
     else:
         df_clean['accVertical'] = df_clean['accFrontal']
 
-    if col_map['accLateral'] is not None:
+    if col_map['accLateral'] is not None and col_map['accLateral'] < len(df_raw.columns):
         df_clean['accLateral'] = pd.to_numeric(df_raw.iloc[:, col_map['accLateral']].astype(str).str.replace(',', '.'), errors='coerce')
     else:
         df_clean['accLateral'] = df_clean['accFrontal']
 
-    # Asignación de código de actividad (por columna o por nombre del archivo)
     b_lower = filename.lower()
     default_act = 1
     if 'acostada' in b_lower: default_act = 3
@@ -169,7 +139,7 @@ def parse_sensor_dataframe(text_data, filename):
     elif 'bipeda' in b_lower or 'bípeda' in b_lower: default_act = 2
     elif 'marcha' in b_lower or 'caminar' in b_lower or 'deambulando' in b_lower: default_act = 4
 
-    if col_map['activity'] is not None:
+    if col_map['activity'] is not None and col_map['activity'] < len(df_raw.columns):
         act_series = pd.to_numeric(df_raw.iloc[:, col_map['activity']].astype(str).str.replace(',', '.'), errors='coerce')
         df_clean['activityCode'] = act_series.fillna(default_act).astype(int)
     else:
@@ -178,13 +148,11 @@ def parse_sensor_dataframe(text_data, filename):
     df_clean = df_clean.dropna(subset=['time', 'accFrontal']).reset_index(drop=True)
 
     if df_clean.empty:
-        raise ValueError("El archivo contiene encabezados pero ninguna fila con datos numéricos válidos.")
+        raise ValueError("El archivo contiene datos pero las columnas numéricas no arrojaron valores válidos.")
 
     meta_info = {
-        'total_filas_originales': len(df_raw),
         'total_filas_validas': len(df_clean),
         'columnas_detectadas': col_names,
-        'mapeo_indices': col_map,
         'separador_utilizado': str(sep)
     }
 
@@ -192,15 +160,13 @@ def parse_sensor_dataframe(text_data, filename):
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend de Ingesta Inteligente Activo"})
+    return jsonify({"status": "online", "mensaje": "Backend activo y optimizado para UTF-16"})
 
 @app.route('/inspeccionar', methods=['POST'])
 def inspeccionar():
-    """Paso 2, 3 y 6: Inspecciona un archivo sin procesarlo definitivamente y entrega vista previa."""
     try:
         if not request.files:
             return jsonify({'error': 'No se recibió ningún archivo'}), 400
-
         file_key = list(request.files.keys())[0]
         file = request.files[file_key]
         filename = file.filename if file.filename else "archivo.txt"
@@ -210,27 +176,17 @@ def inspeccionar():
         text_data, encoding_used = decodificar_texto(file_bytes)
 
         if not text_data:
-            return jsonify({'error': f'Formato no compatible. No se pudo decodificar la codificación del archivo {filename}.'}), 400
+            return jsonify({'error': f'No se pudo decodificar el archivo {filename}.'}), 400
 
         df_clean, meta = parse_sensor_dataframe(text_data, filename)
-
-        # Generar vista previa de las primeras 5 filas
         preview_rows = df_clean.head(5).to_dict(orient='records')
 
-        return jsonify({
-            'status': 'success',
-            'filename': filename,
-            'encoding': encoding_used,
-            'meta': meta,
-            'preview': preview_rows
-        })
-
+        return jsonify({'status': 'success', 'filename': filename, 'encoding': encoding_used, 'meta': meta, 'preview': preview_rows})
     except Exception as e:
         return jsonify({'error': str(e)}), 422
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
-    """Pasos 4 y 5: Procesa los datos dinámicamente y entrega las métricas globales."""
     try:
         if not request.files:
             return jsonify({'error': 'No se encontró ningún archivo'}), 400
@@ -252,7 +208,6 @@ def analizar():
         df, meta = parse_sensor_dataframe(text_data, filename)
         total_records = len(df)
 
-        # Identificación del paciente
         gender_char = base_name[-1].upper() if len(base_name) > 0 and base_name[-1].upper() in ['F', 'M'] else 'F'
         gender = "Femenino" if gender_char == 'F' else "Masculino"
         
@@ -261,9 +216,12 @@ def analizar():
         clean_words = [w.strip() for w in words if w.lower() not in activity_keywords and not w.isdigit() and len(w) > 0]
         patient_id = " ".join(clean_words).strip().title()
         if not patient_id or len(patient_id) < 2:
-            patient_id = "Mejia Karol"
+            match_p = re.search(r'(p\d+|d\d+p\d+)', base_name.lower())
+            if match_p:
+                patient_id = f"Paciente {match_p.group(1).upper()}"
+            else:
+                patient_id = "Participante 01"
 
-        # Normalización del tiempo
         t_min = df['time'].min()
         t_max = df['time'].max()
         raw_duration = t_max - t_min
@@ -281,13 +239,7 @@ def analizar():
         total_time = max(1, total_time)
         activity_counts = df['activityCode'].value_counts().to_dict()
 
-        activity_names_map = {
-            1: 'Sentado en la cama',
-            2: 'Sentado en una silla',
-            3: 'Acostado',
-            4: 'Deambulando'
-        }
-
+        activity_names_map = {1: 'Sentado en la cama', 2: 'Sentado en una silla', 3: 'Acostado', 4: 'Deambulando'}
         intensity_weights = {1: 0.3, 2: 0.5, 3: 0.1, 4: 1.0}
         pts_config = {1: 5, 2: 5, 3: 2, 4: 30}
 
