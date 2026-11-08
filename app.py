@@ -10,7 +10,7 @@ CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend activo para formato Time, Acc, Gyro y nombres de archivo"})
+    return jsonify({"status": "online", "mensaje": "Backend activo con soporte UTF-16 para .txtux"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -25,7 +25,7 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         b_lower = clean_filename.lower()
         
-        # Determinar la actividad basándonos estrictamente en el nombre del archivo
+        # Determinar actividad por el nombre del archivo
         if 'acostada' in b_lower:
             activity_code = 3
             act_name = 'Acostado'
@@ -42,24 +42,24 @@ def analizar():
             activity_code = 1
             act_name = 'Sentado en la cama'
 
-        # Género y Paciente por defecto
         gender_char = clean_filename[-1].upper() if len(clean_filename) > 0 and clean_filename[-1].upper() in ['F', 'M'] else 'F'
         gender = "Femenino" if gender_char == 'F' else "Masculino"
         patient_id = "Mejia Karol"
 
-        # Lectura robusta del archivo
+        # Lectura robusta con soporte prioritario para UTF-16 (archivos .txtux)
         file.seek(0)
         file_bytes = file.read()
         text_data = ""
-        for enc in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+        for enc in ['utf-16', 'utf-16le', 'utf-16be', 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
             try:
                 text_data = file_bytes.decode(enc)
-                break
+                if len(text_data.strip()) > 0 and '\x00' not in text_data[:100]:
+                    break
             except UnicodeDecodeError:
                 continue
         
         if not text_data:
-            return jsonify({'error': 'No se pudo decodificar el archivo.'}), 400
+            return jsonify({'error': f'No se pudo decodificar el archivo {filename}.'}), 400
 
         lines = text_data.splitlines()
         data_rows = []
@@ -69,17 +69,16 @@ def analizar():
             if not line_str:
                 continue
             
-            # Omitir filas de cabecera con texto
             line_lower = line_str.lower()
             if any(word in line_lower for word in ['time', 't(s)', 'acc', 'gyro', 'roll', 'pitch', 'yaw']):
                 continue
             
             try:
-                # Reemplazar comas decimales por puntos para estandarizar la lectura numérica
+                # Normalizar comas decimales a puntos y extraer números
                 normalized_line = line_str.replace(',', '.')
                 numbers = re.findall(r'[-+]?\d*\.?\d+', normalized_line)
                 
-                # Se esperan al menos 4 números: Time, AccX, AccY, AccZ
+                # Se esperan columnas: Time, AccX, AccY, AccZ (al menos 4 números)
                 if len(numbers) >= 4:
                     t_val = float(numbers[0])
                     ax = float(numbers[1])
@@ -91,13 +90,12 @@ def analizar():
                 continue
 
         if len(data_rows) == 0:
-            return jsonify({'error': f'El archivo {filename} no contiene filas numéricas válidas para Time y Aceleración.'}), 400
+            return jsonify({'error': f'El archivo {filename} no contiene filas numéricas válidas.'}), 400
 
         df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral', 'activityCode'])
         df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
-        # Normalización del tiempo en segundos
         t_min = df['time'].min()
         t_max = df['time'].max()
         raw_duration = t_max - t_min
@@ -114,7 +112,6 @@ def analizar():
 
         total_time = max(1, total_time)
 
-        # Como cada archivo individual corresponde a una actividad detectada por su nombre:
         est_time = total_time
         percentage = 100.0
         
