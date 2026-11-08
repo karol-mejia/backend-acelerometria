@@ -1,228 +1,106 @@
 import os
 import re
 import io
+import traceback
 import pandas as pd
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
 
 app = Flask(__name__)
 CORS(app)
 
-def leer_archivo_universal(file_bytes, filename):
-    """
-    Lee de forma inteligente archivos Excel (.xlsx, .xls), CSV, TXT o TXTUX,
-    detectando automáticamente la codificación, separadores y filas de encabezado.
-    """
-    ext = os.path.splitext(filename)[1].lower()
-    
-    # 1. Soporte para archivos Excel
-    if ext in ['.xlsx', '.xls']:
-        try:
-            # Leer todas las hojas o la primera hoja disponible
-            excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
-            sheet_name = excel_file.sheet_names[0]
-            df_raw = pd.read_excel(excel_file, sheet_name=sheet_name)
-            return df_raw, "Excel (.xlsx/.xls)"
-        except Exception as e:
-            raise ValueError(f"No se pudo leer el archivo Excel: {str(e)}")
-
-    # 2. Soporte para archivos de texto / planos (.txt, .csv, .txtux)
-    text_data = None
-    encoding_usado = None
+def decodificar_texto(file_bytes):
+    """Decodifica archivos soportando UTF-16, UTF-8 y Latin-1 (esencial para .txtux)."""
     encodings = ['utf-16', 'utf-16le', 'utf-16be', 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
-    
     for enc in encodings:
         try:
             decoded = file_bytes.decode(enc)
             if decoded and len(decoded.strip()) > 0:
                 if enc in ['utf-16', 'utf-16le', 'utf-16be', 'utf-8']:
-                    text_data = decoded
-                    encoding_usado = enc
-                    break
+                    return decoded, enc
                 if decoded.count('\x00') < (len(decoded) * 0.05):
-                    text_data = decoded
-                    encoding_usado = enc
-                    break
+                    return decoded, enc
         except Exception:
             continue
-
-    if not text_data:
-        try:
-            text_data = file_bytes.decode('utf-16', errors='ignore')
-            encoding_usado = 'utf-16 (forzado)'
-        except Exception:
-            text_data = file_bytes.decode('latin-1', errors='ignore')
-            encoding_usado = 'latin-1 (forzado)'
-
-    lines = [line.strip() for line in text_data.splitlines() if line.strip()]
-    if not lines:
-        raise ValueError("El archivo está completamente vacío.")
-
-    # Auto-descubrimiento de la fila de encabezado real (ignorando metadatos superiores)
-    header_idx = 0
-    for idx, line in enumerate(lines[:15]):
-        l_low = line.lower()
-        if any(kw in l_low for kw in ['time', 'tiempo', 't(s)', 'acc', 'gyro', 'x', 'y', 'z', 'roll', 'pitch']):
-            header_idx = idx
-            break
-        # Si la línea tiene múltiples números o separadores, asumimos que ahí empiezan los datos
-        if len(re.findall(r'[,;\t\s]+', line)) >= 2:
-            header_idx = max(0, idx - 1)
-            break
-
-    # Intentar leer tabularmente con pandas detectando el separador automáticamente
     try:
-        csv_buffer = io.StringIO("\n".join(lines[header_idx:]))
-        df_raw = pd.read_csv(csv_buffer, sep=None, engine='python', on_bad_lines='skip')
-        if df_raw.empty or len(df_raw.columns) <= 1:
-            raise ValueError("Estructura tabular muy angosta.")
-        return df_raw, f"Texto estructurado ({encoding_usado})"
-    except Exception:
-        # Respaldo: extracción directa por filas y expresiones regulares
-        data_matrix = []
-        for line in lines[header_idx:]:
-            if any(w in line.lower() for w in ['time', 't(s)', 'acc.', 'gyro.', 'roll', 'pitch', 'yaw']):
+        return file_bytes.decode('utf-16', errors='ignore'), 'utf-16 (forzado)'
+    except:
+        return file_bytes.decode('latin-1', errors='ignore'), 'latin-1 (forzado)'
+
+def procesar_columnas_estrictas(file_bytes, filename):
+    """
+    Extrae estrictamente:
+    - Columna 1 (Índice 0): Tiempo
+    - Columna 2 (Índice 1): Aceleración Frontal
+    - Columna 3 (Índice 2): Aceleración Vertical
+    - Columna 4 (Índice 3): Aceleración Lateral
+    - Columna 9 (Índice 8): Etiqueta / Código de Actividad
+    """
+    text_data, encoding_usado = decodificar_texto(file_bytes)
+    lines = [line.strip() for line in text_data.splitlines() if line.strip()]
+    
+    if not lines:
+        raise ValueError(f"El archivo {filename} está vacío.")
+
+    # Detectar separador tabulado, coma o punto y coma
+    sample = "\n".join(lines[:15])
+    if sample.count('\t') > sample.count(','):
+        sep = r'\t+'
+    elif sample.count(';') > sample.count(','):
+        sep = ';'
+    elif sample.count(',') > 0:
+        sep = ','
+    else:
+        sep = r'\s+'
+
+    # Leer filas ignorando cabeceras de texto descriptivo
+    data_rows = []
+    for line in lines:
+        l_low = line.lower()
+        if any(w in l_low for w in ['time', 't(s)', 'acc', 'gyro', 'roll', 'pitch', 'yaw']):
+            continue
+        
+        normalized = line.replace(',', '.')
+        nums = re.findall(r'[-+]?\d*\.?\d+', normalized)
+        
+        # Necesitamos al menos las primeras 4 columnas (Tiempo y 3 ejes)
+        if len(nums) >= 4:
+            try:
+                t_val = float(nums[0])  # Columna 1
+                ax = float(nums[1])     # Columna 2
+                ay = float(nums[2])     # Columna 3
+                az = float(nums[3])     # Columna 4
+                
+                # Columna 9 (Índice 8). Si no existe en el archivo, se deduce del nombre.
+                if len(nums) >= 9:
+                    act_code = int(float(nums[8]))
+                else:
+                    b_lower = filename.lower()
+                    if 'acostada' in b_lower: act_code = 3
+                    elif 'sentada' in b_lower:
+                        act_code = 1 if 'cama' in b_lower else 2
+                    elif 'bipeda' in b_lower or 'bípeda' in b_lower: act_code = 2
+                    elif 'marcha' in b_lower or 'caminar' in b_lower or 'deambulando' in b_lower: act_code = 4
+                    else: act_code = 1
+                
+                data_rows.append([t_val, ax, ay, az, act_code])
+            except Exception:
                 continue
-            nums = re.findall(r'[-+]?\d*\.?\d+', line.replace(',', '.'))
-            if len(nums) >= 2:
-                data_matrix.append([float(n) for n in nums])
-        
-        if not data_matrix:
-            raise ValueError("No se encontraron filas numéricas procesables en el archivo.")
-        
-        df_raw = pd.DataFrame(data_matrix)
-        return df_raw, f"Texto plano parseado por Regex ({encoding_usado})"
 
-def mapear_columnas_universal(df_raw, filename):
-    """
-    Identifica dinámicamente las columnas de Tiempo, Aceleración (X, Y, Z) 
-    y Actividad sin importar el nombre o el orden en el archivo.
-    """
-    columnas = [str(col).strip() for col in df_raw.columns]
-    num_cols = len(columnas)
-    
-    col_map = {'time': None, 'accFrontal': None, 'accVertical': None, 'accLateral': None, 'activity': None}
+    if not data_rows:
+        raise ValueError(f"El archivo {filename} no contiene filas numéricas válidas para las columnas requeridas.")
 
-    patterns_time = r'^(time|tiempo|t|t\(s\)|timestamp|sec|segundos)$'
-    patterns_x = r'^(acc_?x|x|frontal|accfrontal|x\(m/s\^2\)|ax)$'
-    patterns_y = r'^(acc_?y|y|vertical|accvertical|y\(m/s\^2\)|ay)$'
-    patterns_z = r'^(acc_?z|z|lateral|acclateral|z\(m/s\^2\)|az)$'
-    patterns_act = r'^(activity|actividad|label|code|codigo|estado|postura)$'
-
-    # 1. Búsqueda por nombres coincidentes en encabezados
-    for idx, col in enumerate(columnas):
-        c_low = col.lower().strip()
-        if not col_map['time'] and re.search(patterns_time, c_low): col_map['time'] = idx
-        elif not col_map['accFrontal'] and re.search(patterns_x, c_low): col_map['accFrontal'] = idx
-        elif not col_map['accVertical'] and re.search(patterns_y, c_low): col_map['accVertical'] = idx
-        elif not col_map['accLateral'] and re.search(patterns_z, c_low): col_map['accLateral'] = idx
-        elif not col_map['activity'] and re.search(patterns_act, c_low): col_map['activity'] = idx
-
-    # 2. Búsqueda por perfil numérico si faltan columnas clave
-    numeric_cols = []
-    for idx in range(num_cols):
-        series = pd.to_numeric(df_raw.iloc[:, idx].astype(str).str.replace(',', '.'), errors='coerce')
-        if series.notnull().sum() > (len(df_raw) * 0.2):
-            numeric_cols.append(idx)
-
-    if col_map['time'] is None and len(numeric_cols) >= 1:
-        col_map['time'] = numeric_cols[0]
-
-    remaining_num = [c for c in numeric_cols if c != col_map['time']]
-    if col_map['accFrontal'] is None and len(remaining_num) >= 1: col_map['accFrontal'] = remaining_num[0]
-    if col_map['accVertical'] is None and len(remaining_num) >= 2: col_map['accVertical'] = remaining_num[1]
-    if col_map['accLateral'] is None and len(remaining_num) >= 3: col_map['accLateral'] = remaining_num[2]
-
-    # Detectar actividad por número de columnas (ej. columna 9 / índice 8) o valores discretos
-    if col_map['activity'] is None:
-        if num_cols >= 9:
-            col_map['activity'] = 8
-        else:
-            for c in remaining_num[3:]:
-                series = pd.to_numeric(df_raw.iloc[:, c].astype(str).str.replace(',', '.'), errors='coerce')
-                unique_vals = series.dropna().unique()
-                if len(unique_vals) <= 10 and all(float(v).is_integer() for v in unique_vals if pd.notnull(v)):
-                    col_map['activity'] = c
-                    break
-
-    return col_map, columnas
-
-def procesar_dataframe_sensor(df_raw, filename):
-    col_map, col_names = mapear_columnas_universal(df_raw, filename)
-
-    if col_map['time'] is None:
-        col_map['time'] = 0
-    if col_map['accFrontal'] is None:
-        col_map['accFrontal'] = 1 if len(df_raw.columns) > 1 else 0
-
-    df_clean = pd.DataFrame()
-    df_clean['time'] = pd.to_numeric(df_raw.iloc[:, col_map['time']].astype(str).str.replace(',', '.'), errors='coerce')
-    df_clean['accFrontal'] = pd.to_numeric(df_raw.iloc[:, col_map['accFrontal']].astype(str).str.replace(',', '.'), errors='coerce')
-    
-    if col_map['accVertical'] is not None and col_map['accVertical'] < len(df_raw.columns):
-        df_clean['accVertical'] = pd.to_numeric(df_raw.iloc[:, col_map['accVertical']].astype(str).str.replace(',', '.'), errors='coerce')
-    else:
-        df_clean['accVertical'] = df_clean['accFrontal']
-
-    if col_map['accLateral'] is not None and col_map['accLateral'] < len(df_raw.columns):
-        df_clean['accLateral'] = pd.to_numeric(df_raw.iloc[:, col_map['accLateral']].astype(str).str.replace(',', '.'), errors='coerce')
-    else:
-        df_clean['accLateral'] = df_clean['accFrontal']
-
-    # Detección de actividad por nombre de archivo si no viene en columna
-    b_lower = filename.lower()
-    default_act = 1
-    if 'acostada' in b_lower: default_act = 3
-    elif 'sentada' in b_lower: default_act = 2
-    elif 'bipeda' in b_lower or 'bípeda' in b_lower: default_act = 2
-    elif 'marcha' in b_lower or 'caminar' in b_lower or 'deambulando' in b_lower: default_act = 4
-
-    if col_map['activity'] is not None and col_map['activity'] < len(df_raw.columns):
-        act_series = pd.to_numeric(df_raw.iloc[:, col_map['activity']].astype(str).str.replace(',', '.'), errors='coerce')
-        df_clean['activityCode'] = act_series.fillna(default_act).astype(int)
-    else:
-        df_clean['activityCode'] = default_act
-
-    df_clean = df_clean.dropna(subset=['time', 'accFrontal']).reset_index(drop=True)
-
-    if df_clean.empty:
-        raise ValueError("El archivo no contiene filas con registros numéricos válidos tras el procesamiento.")
-
-    meta_info = {
-        'total_filas_originales': len(df_raw),
-        'total_filas_validas': len(df_clean),
-        'columnas_detectadas': col_names,
-        'mapeo_indices': col_map
-    }
-
-    return df_clean, meta_info
+    df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral', 'activityCode'])
+    df = df.dropna().reset_index(drop=True)
+    return df, encoding_usado
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend Universal de Ingesta Activo"})
-
-@app.route('/inspeccionar', methods=['POST'])
-def inspeccionar():
-    try:
-        if not request.files:
-            return jsonify({'error': 'No se recibió ningún archivo'}), 400
-        file_key = list(request.files.keys())[0]
-        file = request.files[file_key]
-        filename = file.filename if file.filename else "archivo.txt"
-
-        file.seek(0)
-        file_bytes = file.read()
-        
-        df_raw, tipo_lectura = leer_archivo_universal(file_bytes, filename)
-        df_clean, meta = procesar_dataframe_sensor(df_raw, filename)
-        meta['tipo_lectura'] = tipo_lectura
-
-        preview_rows = df_clean.head(5).to_dict(orient='records')
-
-        return jsonify({'status': 'success', 'filename': filename, 'meta': meta, 'preview': preview_rows})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 422
+    return jsonify({"status": "online", "mensaje": "Backend de Acelerometría con Random Forest activo"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -233,18 +111,17 @@ def analizar():
         file_key = list(request.files.keys())[0]
         file = request.files[file_key]
         filename = file.filename if file.filename else "archivo.txt"
-
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         base_name = os.path.splitext(clean_filename)[0]
 
         file.seek(0)
         file_bytes = file.read()
 
-        df_raw, tipo_lectura = leer_archivo_universal(file_bytes, filename)
-        df, meta = procesar_dataframe_sensor(df_raw, filename)
-        meta['tipo_lectura'] = tipo_lectura
+        # Procesar datos reales usando columnas 1, 2, 3, 4 y 9
+        df, encoding_usado = procesar_columnas_estrictas(file_bytes, filename)
         total_records = len(df)
 
+        # Identificar paciente y género
         gender_char = base_name[-1].upper() if len(base_name) > 0 and base_name[-1].upper() in ['F', 'M'] else 'F'
         gender = "Femenino" if gender_char == 'F' else "Masculino"
         
@@ -254,11 +131,35 @@ def analizar():
         patient_id = " ".join(clean_words).strip().title()
         if not patient_id or len(patient_id) < 2:
             match_p = re.search(r'(p\d+|d\d+p\d+)', base_name.lower())
-            if match_p:
-                patient_id = f"Paciente {match_p.group(1).upper()}"
-            else:
-                patient_id = "Participante 01"
+            patient_id = f"Paciente {match_p.group(1).upper()}" if match_p else "Mejia Karol"
 
+        # Entrenamiento y validación del modelo Random Forest con los datos reales
+        rf_metrics = {}
+        if total_records > 15:
+            try:
+                X = df[['accFrontal', 'accVertical', 'accLateral']]
+                y = df['activityCode']
+                
+                # Evitar fuga de datos dividiendo train/test de forma estratificada si hay múltiples clases
+                if len(y.unique()) > 1 and y.value_counts().min() >= 2:
+                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+                else:
+                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+                
+                rf_model = RandomForestClassifier(n_estimators=50, random_state=42)
+                rf_model.fit(X_train, y_train)
+                y_pred = rf_model.predict(X_test)
+                
+                conf_matrix = confusion_matrix(y_test, y_pred).tolist()
+                rf_metrics = {
+                    "status": "Entrenado con éxito",
+                    "confusionMatrix": conf_matrix,
+                    "featuresUsed": ["accFrontal", "accVertical", "accLateral"]
+                }
+            except Exception as rf_err:
+                rf_metrics = {"status": "No se pudo entrenar (datos homogéneos)", "error": str(rf_err)}
+
+        # Normalización temporal
         t_min = df['time'].min()
         t_max = df['time'].max()
         raw_duration = t_max - t_min
@@ -276,7 +177,13 @@ def analizar():
         total_time = max(1, total_time)
         activity_counts = df['activityCode'].value_counts().to_dict()
 
-        activity_names_map = {1: 'Sentado en la cama', 2: 'Sentado en una silla', 3: 'Acostado', 4: 'Deambulando'}
+        activity_names_map = {
+            1: 'Sentado en la cama',
+            2: 'Sentado en una silla',
+            3: 'Acostado',
+            4: 'Deambulando'
+        }
+        
         intensity_weights = {1: 0.3, 2: 0.5, 3: 0.1, 4: 1.0}
         pts_config = {1: 5, 2: 5, 3: 2, 4: 30}
 
@@ -301,11 +208,22 @@ def analizar():
                 "activity": act_label,
                 "time": f"{est_time} s",
                 "percentage": f"{percentage}%",
-                "points": f"+{points_earned} pts"
+                "points": f"+{points_earned} pts",
+                "code": code_int
             })
 
         active_percentage = float(round((weighted_activity_sum / total_records) * 100, 1))
-        badge = "Oro (Nivel Avanzado)" if total_score > 1500 else ("Plata (Nivel Intermedio)" if total_score > 800 else "Bronce (Nivel Iniciador)")
+        
+        # Asignación de Insignias y Mensajes de Motivación basados en resultados reales
+        if total_score > 1500:
+            badge = "Oro (Nivel Avanzado)"
+            motivation_message = "¡Excelente desempeño! Has mantenido un excelente equilibrio de movilidad y actividad física constante. ¡Sigue así!"
+        elif total_score > 800:
+            badge = "Plata (Nivel Intermedio)"
+            motivation_message = "¡Muy buen trabajo! Tu constancia en las actividades cotidianas muestra un progreso sólido. ¡Intenta incorporar más caminatas!"
+        else:
+            badge = "Bronce (Nivel Iniciador)"
+            motivation_message = "¡Buen inicio! Recuerda que cada movimiento cuenta. Incrementa poco a poco el tiempo en deambulación para ganar más puntos."
 
         resultado = {
             "id": patient_id,
@@ -315,14 +233,16 @@ def analizar():
             "score": total_score,
             "badge": badge,
             "activePercentage": active_percentage,
+            "motivationMessage": motivation_message,
+            "randomForestMetrics": rf_metrics,
             "activityBreakdown": activity_breakdown,
-            "data": df.to_dict(orient='records'),
-            "meta": meta
+            "data": df.to_dict(orient='records')
         }
 
         return jsonify(resultado)
 
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 422
 
 if __name__ == '__main__':
