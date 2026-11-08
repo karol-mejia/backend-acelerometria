@@ -10,7 +10,7 @@ CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "mensaje": "Backend activo con soporte UTF-16 para .txtux"})
+    return jsonify({"status": "online", "mensaje": "Backend activo con parser flexible de columnas"})
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -25,7 +25,7 @@ def analizar():
         clean_filename = filename.split('/')[-1].split('\\')[-1]
         b_lower = clean_filename.lower()
         
-        # Determinar actividad por el nombre del archivo
+        # Determinar la actividad basándonos en el nombre del archivo
         if 'acostada' in b_lower:
             activity_code = 3
             act_name = 'Acostado'
@@ -46,7 +46,7 @@ def analizar():
         gender = "Femenino" if gender_char == 'F' else "Masculino"
         patient_id = "Mejia Karol"
 
-        # Lectura robusta con soporte prioritario para UTF-16 (archivos .txtux)
+        # Lectura robusta con soporte UTF-16 para archivos .txtux
         file.seek(0)
         file_bytes = file.read()
         text_data = ""
@@ -70,32 +70,34 @@ def analizar():
                 continue
             
             line_lower = line_str.lower()
+            # Omitir filas de cabecera con texto
             if any(word in line_lower for word in ['time', 't(s)', 'acc', 'gyro', 'roll', 'pitch', 'yaw']):
                 continue
             
             try:
-                # Normalizar comas decimales a puntos y extraer números
+                # Normalizar comas decimales a puntos y extraer todos los números de la línea
                 normalized_line = line_str.replace(',', '.')
                 numbers = re.findall(r'[-+]?\d*\.?\d+', normalized_line)
                 
-                # Se esperan columnas: Time, AccX, AccY, AccZ (al menos 4 números)
-                if len(numbers) >= 4:
+                # FLEXIBLE: Con que tenga al menos 2 números (Tiempo y al menos un eje de aceleración)
+                if len(numbers) >= 2:
                     t_val = float(numbers[0])
                     ax = float(numbers[1])
-                    ay = float(numbers[2])
-                    az = float(numbers[3])
+                    ay = float(numbers[2]) if len(numbers) > 2 else ax
+                    az = float(numbers[3]) if len(numbers) > 3 else ax
                     
                     data_rows.append([t_val, ax, ay, az, activity_code])
             except Exception:
                 continue
 
         if len(data_rows) == 0:
-            return jsonify({'error': f'El archivo {filename} no contiene filas numéricas válidas.'}), 400
+            return jsonify({'error': f'El archivo {filename} no contiene filas numéricas procesables.'}), 400
 
         df = pd.DataFrame(data_rows, columns=['time', 'accFrontal', 'accVertical', 'accLateral', 'activityCode'])
         df = df.dropna().reset_index(drop=True)
         total_records = len(df)
         
+        # Normalización del tiempo en segundos
         t_min = df['time'].min()
         t_max = df['time'].max()
         raw_duration = t_max - t_min
